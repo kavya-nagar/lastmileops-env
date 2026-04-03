@@ -1,0 +1,49 @@
+name: lastmileops-env
+version: "1.0.0"
+description: >
+  LastMileOps is a telecom field-operations environment where an AI agent
+  manages network incidents, dispatches technicians, reroutes traffic,
+  reserves parts, and restores service for real-world ISP scenarios.
+
+author: Kavya Nagar
+license: MIT
+
+environment:
+  base_url: http://0.0.0.0:8000
+  endpoints:
+    reset: /reset
+    step: /step
+    state: /state
+    health: /health
+
+tasks:
+  - id: easy
+    name: Single-site remote fix
+    max_steps: 8
+    description: Identify the affected ONT, run remote diagnostics, reboot device, close ticket.
+
+  - id: medium
+    name: Cabinet failure dispatch
+    max_steps: 10
+    description: Diagnose cabinet optical failure, reserve SFP module, dispatch technician, close ticket.
+
+  - id: hard
+    name: Regional storm response
+    max_steps: 12
+    description: Handle multi-incident storm outage — reroute traffic, reboot aggregation router, repair cabinet, dispatch technician, close all tickets.
+
+action_space:
+  type: structured
+  schema: LastMileOpsAction
+
+observation_space:
+  type: structured
+  schema: LastMileOpsObservation
+
+reward:
+  range: [0.0, 1.0]
+  type: float
+
+docker:
+  image: lastmileops-env
+  port: 8000
