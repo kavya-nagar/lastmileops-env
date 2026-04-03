@@ -9,13 +9,11 @@ import requests
 from openai import OpenAI
 
 # ── env variables ──────────────────────────────────────────────────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
-HF_TOKEN     = os.environ.get("HF_TOKEN",     os.environ.get("OPENAI_API_KEY", ""))
-ENV_URL      = os.environ.get("ENV_URL",      "http://0.0.0.0:8000")
+API_BASE_URL = os.environ.get("API_BASE_URL", "<your-active-api-base-url>")
+MODEL_NAME   = os.environ.get("MODEL_NAME",   "<your-active-model-name>")
+HF_TOKEN     = os.environ.get("HF_TOKEN")
 
-client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-
+client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 TASKS = ["easy", "medium", "hard"]
 
 SYSTEM_PROMPT = """You are an expert telecom NOC engineer controlling a LastMileOps environment.
