@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .models import Action, Observation, StepResult
 from .environment import LastMileOpsEnv, ACTION_SPACE
@@ -24,6 +24,20 @@ env = LastMileOpsEnv()
 
 class ResetRequest(BaseModel):
     task_id: str = "easy"
+
+
+@app.get("/")
+def root():
+    return {
+        "name": "LastMileOps — Telecom NOC OpenEnv",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+        "tasks": "/tasks",
+        "reset": "POST /reset",
+        "step": "POST /step",
+        "state": "GET /state",
+    }
 
 
 @app.get("/health")
@@ -66,7 +80,9 @@ def list_actions():
 
 
 @app.post("/reset", response_model=Observation)
-def reset(req: ResetRequest):
+def reset(req: Optional[ResetRequest] = None):
+    if req is None:
+        req = ResetRequest(task_id="easy")
     try:
         obs = env.reset(task_id=req.task_id)
     except ValueError as e:
