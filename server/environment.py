@@ -1,416 +1,269 @@
 from __future__ import annotations
+from typing import Any, Dict, Tuple
+from .models import Action, Observation, StepResult, Incident, NetworkNode, Technician, SparePart
 
-import copy
-import uuid
-from typing import Any, Dict, List
+ACTION_SPACE = {
+    "run_diagnostic":       "Run remote diagnostic on a node. params: {node_id}",
+    "reboot_device":        "Reboot a network device. params: {node_id}",
+    "dispatch_technician":  "Send technician to location. params: {tech_id, location}",
+    "reserve_part":         "Reserve spare part. params: {part_id}",
+    "reroute_traffic":      "Reroute traffic between nodes. params: {from_node_id, to_node_id}",
+    "send_customer_update": "Notify customer. params: {incident_id, message_type}",
+    "close_ticket":         "Close resolved incident. params: {incident_id}",
+    "noop":                 "No action (penalised).",
+}
 
-from models import (
-    IncidentSummary,
-    InventorySummary,
-    LastMileOpsAction,
-    LastMileOpsObservation,
-    LastMileOpsState,
-    NodeSummary,
-    ResetResult,
-    StepResult,
-    TechnicianSummary,
-)
-
-
-TASKS: Dict[str, Dict[str, Any]] = {
-    "easy": {
-        "task_name": "Single-site remote fix",
-        "prompt": "A business customer is offline. Identify the affected node, run the right remote diagnostic, reboot the correct device, then close the ticket.",
-        "max_steps": 8,
+SCENARIOS = {
+    "easy": lambda: {
+        "task_id": "easy", "max_steps": 10,
         "incidents": [
-            {
-                "ticket_id": "INC-1001",
-                "customer": "BlueCart Grocery",
-                "priority": "high",
-                "sla_minutes_remaining": 90,
-                "status": "open",
-                "symptom": "ONT not responding",
-                "affected_node": "ONT-7",
-                "service_restored": False,
-            }
+            Incident(id="INC-001", customer_id="BIZ-42", customer_tier="business",
+                     symptom="No connectivity", affected_node="ONT-007", status="open", priority=2),
         ],
-        "nodes": [
-            {"node_id": "ONT-7", "node_type": "ont", "status": "hung", "cpu_load": 98, "power_ok": True, "linked_backup": None},
-            {"node_id": "OLT-A1", "node_type": "olt", "status": "healthy", "cpu_load": 36, "power_ok": True, "linked_backup": None},
+        "network": [
+            NetworkNode(id="ONT-007", type="ont", status="offline", load_pct=0),
+            NetworkNode(id="CAB-003", type="cabinet", status="online", load_pct=45),
         ],
         "technicians": [
-            {"tech_id": "T-01", "name": "Ravi", "skills": ["fiber", "router"], "region": "north", "available": True, "eta_minutes": 35},
+            Technician(id="T1", name="Alice", skill="fiber",   available=True, location="depot"),
+            Technician(id="T2", name="Bob",   skill="network", available=True, location="depot"),
         ],
-        "inventory": [{"depot_id": "D-1", "items": {"sfp_module": 2, "ont": 1, "power_supply": 3}}],
-        "logs": {"ONT-7": "device heartbeat lost; watchdog timeout; recommended action: reboot_device", "OLT-A1": "all optical levels nominal"},
-        "target": {"ticket_id": "INC-1001", "node_id": "ONT-7", "test_type": "ping"},
+        "inventory": [
+            SparePart(id="P1", name="ONT unit",  quantity=5, reserved=0),
+            SparePart(id="P2", name="Line card", quantity=2, reserved=0),
+        ],
+        "_grader": {"diagnostic_run": False, "reboot_done": False, "ticket_closed": False},
     },
-    "medium": {
-        "task_name": "Cabinet failure dispatch",
-        "prompt": "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare part, dispatch the right technician, and close the ticket only after repair.",
-        "max_steps": 10,
+    "medium": lambda: {
+        "task_id": "medium", "max_steps": 15,
         "incidents": [
-            {
-                "ticket_id": "INC-2002",
-                "customer": "Maple Residency Block C",
-                "priority": "normal",
-                "sla_minutes_remaining": 160,
-                "status": "open",
-                "symptom": "cabinet optical module failure",
-                "affected_node": "CAB-22",
-                "service_restored": False,
-            }
+            Incident(id="INC-010", customer_id="AREA-05", customer_tier="residential",
+                     symptom="Neighbourhood offline", affected_node="CAB-012", status="open", priority=3),
         ],
-        "nodes": [
-            {"node_id": "CAB-22", "node_type": "cabinet", "status": "degraded", "cpu_load": 41, "power_ok": True, "linked_backup": None},
-            {"node_id": "DIST-5", "node_type": "distribution_switch", "status": "healthy", "cpu_load": 52, "power_ok": True, "linked_backup": None},
+        "network": [
+            NetworkNode(id="CAB-012", type="cabinet",     status="offline", load_pct=0),
+            NetworkNode(id="AGG-001", type="aggregation", status="online",  load_pct=60),
         ],
         "technicians": [
-            {"tech_id": "T-02", "name": "Neha", "skills": ["fiber", "splicing"], "region": "east", "available": True, "eta_minutes": 25},
-            {"tech_id": "T-03", "name": "Amit", "skills": ["router"], "region": "east", "available": True, "eta_minutes": 20},
+            Technician(id="T1", name="Alice", skill="fiber",       available=True,  location="depot"),
+            Technician(id="T3", name="Carol", skill="electronics", available=True,  location="north"),
+            Technician(id="T4", name="Dave",  skill="network",     available=False, location="south"),
         ],
-        "inventory": [{"depot_id": "D-2", "items": {"sfp_module": 1, "cabinet_fan": 2, "ont": 2}}],
-        "logs": {"CAB-22": "rx power unstable; sfp fault detected; field replacement required", "DIST-5": "healthy"},
-        "target": {"ticket_id": "INC-2002", "node_id": "CAB-22", "test_type": "optical_power", "part_name": "sfp_module", "depot_id": "D-2", "tech_id": "T-02"},
-    },
-    "hard": {
-        "task_name": "Regional storm response",
-        "prompt": "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet outage, dispatch the right technician, send the right update, restore service, and close all incidents safely.",
-        "max_steps": 12,
-        "incidents": [
-            {
-                "ticket_id": "INC-3001",
-                "customer": "CityCare Hospital",
-                "priority": "critical",
-                "sla_minutes_remaining": 45,
-                "status": "open",
-                "symptom": "aggregation overload after storm",
-                "affected_node": "AGG-9",
-                "service_restored": False,
-            },
-            {
-                "ticket_id": "INC-3002",
-                "customer": "GreenHeights Apartments",
-                "priority": "normal",
-                "sla_minutes_remaining": 150,
-                "status": "open",
-                "symptom": "cabinet optic failure",
-                "affected_node": "CAB-41",
-                "service_restored": False,
-            },
+        "inventory": [
+            SparePart(id="P2", name="Line card",    quantity=3, reserved=0),
+            SparePart(id="P3", name="Power module", quantity=1, reserved=0),
+            SparePart(id="P4", name="Splice kit",   quantity=4, reserved=0),
         ],
-        "nodes": [
-            {"node_id": "AGG-9", "node_type": "aggregation_router", "status": "overloaded", "cpu_load": 100, "power_ok": True, "linked_backup": "AGG-9B"},
-            {"node_id": "AGG-9B", "node_type": "aggregation_router", "status": "healthy", "cpu_load": 44, "power_ok": True, "linked_backup": None},
-            {"node_id": "CAB-41", "node_type": "cabinet", "status": "degraded", "cpu_load": 57, "power_ok": True, "linked_backup": None},
-        ],
-        "technicians": [
-            {"tech_id": "T-04", "name": "Sara", "skills": ["fiber", "splicing"], "region": "south", "available": True, "eta_minutes": 18},
-            {"tech_id": "T-05", "name": "Karan", "skills": ["router", "fiber"], "region": "south", "available": True, "eta_minutes": 30},
-        ],
-        "inventory": [{"depot_id": "D-3", "items": {"sfp_module": 1, "generator": 0, "fiber_patch": 4}}],
-        "logs": {
-            "AGG-9": "storm surge traffic spike; recommended action: reroute_traffic to AGG-9B before reboot_device",
-            "CAB-41": "optic alarm; sfp fault detected; replace sfp_module",
+        "_grader": {
+            "diagnostic_run": False,
+            "correct_part_reserved": False,
+            "correct_tech_dispatched": False,
+            "ticket_closed": False,
         },
-        "target": {
-            "critical_ticket": "INC-3001",
-            "normal_ticket": "INC-3002",
-            "node_id": "AGG-9",
-            "backup_node_id": "AGG-9B",
-            "cabinet_id": "CAB-41",
-            "part_name": "sfp_module",
-            "depot_id": "D-3",
-            "tech_id": "T-04",
+    },
+    "hard": lambda: {
+        "task_id": "hard", "max_steps": 20,
+        "incidents": [
+            Incident(id="INC-020", customer_id="CRIT-01", customer_tier="critical",
+                     symptom="Service down",      affected_node="AGG-002",  status="open", priority=1),
+            Incident(id="INC-021", customer_id="AREA-09", customer_tier="residential",
+                     symptom="Cabinet offline",   affected_node="CAB-019",  status="open", priority=3),
+            Incident(id="INC-022", customer_id="BIZ-77",  customer_tier="business",
+                     symptom="Degraded service",  affected_node="ONT-031",  status="open", priority=2),
+        ],
+        "network": [
+            NetworkNode(id="AGG-002",    type="aggregation", status="overloaded", load_pct=98),
+            NetworkNode(id="AGG-BACKUP", type="backup",      status="online",     load_pct=20),
+            NetworkNode(id="CAB-019",    type="cabinet",     status="offline",    load_pct=0),
+            NetworkNode(id="ONT-031",    type="ont",         status="degraded",   load_pct=70),
+        ],
+        "technicians": [
+            Technician(id="T1", name="Alice", skill="fiber",       available=True,  location="depot"),
+            Technician(id="T3", name="Carol", skill="electronics", available=True,  location="north"),
+            Technician(id="T5", name="Eve",   skill="network",     available=False, location="south"),
+        ],
+        "inventory": [
+            SparePart(id="P1", name="ONT unit",    quantity=2, reserved=0),
+            SparePart(id="P2", name="Line card",   quantity=1, reserved=0),
+            SparePart(id="P3", name="Power module",quantity=0, reserved=0),
+        ],
+        "_grader": {
+            "critical_prioritised":    False,
+            "agg_inspected":           False,
+            "traffic_rerouted":        False,
+            "correct_part_reserved":   False,
+            "correct_tech_dispatched": False,
+            "customer_updated":        False,
+            "all_tickets_closed":      False,
         },
     },
 }
 
 
-class LastMileOpsEnvironment:
-    def __init__(self) -> None:
-        self.reset()
+class LastMileOpsEnv:
+    def __init__(self):
+        self._state: Dict = {}
+        self._step_count = 0
+        self._score = 0.0
+        self._done = False
+        self._action_log = []
 
-    def reset(self, task_id: str = "easy") -> ResetResult:
-        if task_id not in TASKS:
-            task_id = "easy"
-        data = copy.deepcopy(TASKS[task_id])
-        self.episode_id = str(uuid.uuid4())
-        self.task_id = task_id
-        self.task_name = data["task_name"]
-        self.prompt = data["prompt"]
-        self.max_steps = data["max_steps"]
-        self.step_count = 0
-        self.done = False
-        self.score = 0.0
-        self.logs = data["logs"]
-        self.incidents = {x["ticket_id"]: x for x in data["incidents"]}
-        self.nodes = {x["node_id"]: x for x in data["nodes"]}
-        self.techs = {x["tech_id"]: x for x in data["technicians"]}
-        self.inventory = {x["depot_id"]: x["items"] for x in data["inventory"]}
-        self.target = data["target"]
-        self.history: List[str] = [f"Episode started for task={task_id}"]
-        self.visible_logs: Dict[str, str] = {}
-        self.milestones = {
-            "listed": False,
-            "inspected_target": False,
-            "ran_test": False,
-            "rerouted": False,
-            "rebooted": False,
-            "reserved": False,
-            "dispatched": False,
-            "updated": False,
-            "closed": False,
+    def reset(self, task_id: str = "easy") -> Observation:
+        if task_id not in SCENARIOS:
+            raise ValueError(f"Unknown task '{task_id}'. Choose: {list(SCENARIOS)}")
+        self._state = SCENARIOS[task_id]()
+        self._step_count = 0
+        self._score = 0.0
+        self._done = False
+        self._action_log = []
+        return self._build_obs()
+
+    def step(self, action: Action) -> StepResult:
+        if self._done:
+            return StepResult(observation=self._build_obs(), reward=0.0,
+                              done=True, score=self._score, info={"message": "Episode done"})
+        self._step_count += 1
+        reward, msg = self._apply_action(action)
+        self._action_log.append(f"[{self._step_count}] {action.action_type}({action.params}) → {msg}")
+        self._score = self._compute_grader_score()
+        all_closed = all(i.status == "closed" for i in self._state["incidents"])
+        self._done = all_closed or self._step_count >= self._state["max_steps"]
+        return StepResult(
+            observation=self._build_obs(message=msg),
+            reward=round(reward, 4),
+            done=self._done,
+            score=round(self._score, 4),
+            info={"step": self._step_count, "grader": self._state["_grader"], "message": msg},
+        )
+
+    def state(self) -> Dict[str, Any]:
+        return {
+            "task_id":  self._state.get("task_id", ""),
+            "step":     self._step_count,
+            "max_steps":self._state.get("max_steps", 0),
+            "done":     self._done,
+            "score":    round(self._score, 4),
+            "grader_checkpoints": self._state.get("_grader", {}),
+            "incidents":    [i.model_dump() for i in self._state.get("incidents", [])],
+            "network":      [n.model_dump() for n in self._state.get("network", [])],
+            "technicians":  [t.model_dump() for t in self._state.get("technicians", [])],
+            "inventory":    [p.model_dump() for p in self._state.get("inventory", [])],
+            "action_log":   self._action_log,
         }
-        return ResetResult(observation=self._observation("Environment reset."), info={"task_id": task_id})
 
-    def step(self, action: LastMileOpsAction) -> StepResult:
-        if self.done:
-            return StepResult(observation=self._observation("Episode already finished."), reward=0.0, done=True, info={"warning": "already_done"})
+    # ── Action logic ──────────────────────────────────────────────────────────
+    def _apply_action(self, action: Action) -> Tuple[float, str]:
+        t, p, s, g = action.action_type, action.params, self._state, self._state["_grader"]
 
-        self.step_count += 1
-        reward = -0.01
-        info: Dict[str, Any] = {"task_id": self.task_id}
-        msg = "Action processed."
+        if t == "noop":
+            return -0.04, "No-op used."
 
-        if action.action_type == "noop":
-            reward -= 0.03
-            msg = "No-op used."
+        if t == "run_diagnostic":
+            node = self._find_node(p.get("node_id", ""))
+            if not node: return -0.05, f"Node '{p.get('node_id')}' not found."
+            if node.status in ("offline", "degraded", "overloaded"):
+                if "diagnostic_run" in g and not g["diagnostic_run"]: g["diagnostic_run"] = True
+                if "agg_inspected" in g and node.type == "aggregation": g["agg_inspected"] = True
+                return 0.15, f"Diagnostic on {node.id}: {node.status}, load={node.load_pct}%"
+            return 0.05, f"Diagnostic on {node.id}: {node.status} (no fault)."
 
-        elif action.action_type == "list_incidents":
-            if not self.milestones["listed"]:
-                reward += 0.10
-                self.milestones["listed"] = True
-            msg = f"Listed {len(self.incidents)} incidents."
+        if t == "reboot_device":
+            node = self._find_node(p.get("node_id", ""))
+            if not node: return -0.05, f"Node not found."
+            if node.type == "ont" and node.status == "offline":
+                node.status = "online"; node.load_pct = 30
+                if "reboot_done" in g and not g["reboot_done"]: g["reboot_done"] = True
+                for inc in s["incidents"]:
+                    if inc.affected_node == node.id and inc.status in ("open","in_progress"):
+                        inc.status = "resolved"
+                return 0.25, f"Rebooted {node.id} → online. Incident resolved."
+            if node.status == "online": return -0.05, "Already online."
+            return 0.0, f"Reboot had no effect on {node.id}."
 
-        elif action.action_type == "inspect_node":
-            node_id = action.node_id or ""
-            if node_id in self.nodes:
-                self.visible_logs[node_id] = self.logs.get(node_id, "No logs available")
-                if self.task_id == "easy" and node_id == self.target["node_id"]:
-                    reward += 0.20
-                    self.milestones["inspected_target"] = True
-                elif self.task_id == "medium" and node_id == self.target["node_id"]:
-                    reward += 0.20
-                    self.milestones["inspected_target"] = True
-                elif self.task_id == "hard" and node_id in {self.target["node_id"], self.target["cabinet_id"]}:
-                    reward += 0.10
-                    if node_id == self.target["node_id"]:
-                        self.milestones["inspected_target"] = True
-                else:
-                    reward -= 0.02
-                msg = f"Inspected {node_id}."
-            else:
-                reward -= 0.10
-                msg = f"Unknown node {node_id}."
+        if t == "dispatch_technician":
+            tech = self._find_tech(p.get("tech_id", ""))
+            if not tech: return -0.05, "Technician not found."
+            if not tech.available: return -0.08, f"{tech.name} unavailable."
+            bonus = 0.0
+            if tech.skill == "electronics" and s["task_id"] in ("medium","hard"):
+                if "correct_tech_dispatched" in g and not g["correct_tech_dispatched"]:
+                    g["correct_tech_dispatched"] = True; bonus = 0.15
+            tech.available = False; tech.location = p.get("location","site")
+            for inc in s["incidents"]:
+                if inc.status == "open": inc.status = "in_progress"
+            return 0.10 + bonus, f"Dispatched {tech.name} ({tech.skill})."
 
-        elif action.action_type == "run_remote_test":
-            node_id = action.node_id or self._ticket_node(action.ticket_id)
-            test_type = action.test_type
-            if node_id in self.nodes and test_type:
-                correct = False
-                if self.task_id == "easy":
-                    correct = node_id == self.target["node_id"] and test_type == self.target["test_type"]
-                elif self.task_id == "medium":
-                    correct = node_id == self.target["node_id"] and test_type == self.target["test_type"]
-                elif self.task_id == "hard":
-                    correct = (node_id == self.target["node_id"] and test_type in {"cpu_profile", "route_trace"}) or (node_id == self.target["cabinet_id"] and test_type == "optical_power")
-                reward += 0.18 if correct else -0.04
-                if correct:
-                    self.milestones["ran_test"] = True
-                msg = f"Ran {test_type} on {node_id}."
-            else:
-                reward -= 0.08
-                msg = "Invalid test request."
+        if t == "reserve_part":
+            part = self._find_part(p.get("part_id", ""))
+            if not part: return -0.05, "Part not found."
+            if part.quantity - part.reserved <= 0: return -0.08, f"{part.name} out of stock."
+            part.reserved += 1
+            if p.get("part_id") == "P2" and s["task_id"] in ("medium","hard"):
+                if "correct_part_reserved" in g and not g["correct_part_reserved"]:
+                    g["correct_part_reserved"] = True
+                    return 0.20, f"Reserved correct part: {part.name}."
+            return 0.08, f"Reserved {part.name}."
 
-        elif action.action_type == "reboot_device":
-            node_id = action.node_id or ""
-            if node_id not in self.nodes:
-                reward -= 0.10
-                msg = "Unknown node for reboot."
-            else:
-                if self.task_id == "easy" and node_id == self.target["node_id"] and self.milestones["ran_test"]:
-                    self.nodes[node_id]["status"] = "healthy"
-                    self.nodes[node_id]["cpu_load"] = 22
-                    self.incidents[self.target["ticket_id"]]["service_restored"] = True
-                    reward += 0.40
-                    self.milestones["rebooted"] = True
-                    msg = f"Rebooted {node_id}; service restored."
-                elif self.task_id == "hard" and node_id == self.target["node_id"] and self.milestones["rerouted"]:
-                    self.nodes[node_id]["status"] = "healthy"
-                    self.nodes[node_id]["cpu_load"] = 39
-                    self.incidents[self.target["critical_ticket"]]["service_restored"] = True
-                    reward += 0.20
-                    self.milestones["rebooted"] = True
-                    msg = f"Rebooted {node_id} after traffic reroute."
-                else:
-                    reward -= 0.06
-                    msg = f"Reboot of {node_id} had no useful effect."
+        if t == "reroute_traffic":
+            fn = self._find_node(p.get("from_node_id",""))
+            tn = self._find_node(p.get("to_node_id",""))
+            if not fn or not tn: return -0.05, "Node(s) not found."
+            if fn.status == "overloaded" and tn.type == "backup":
+                fn.status = "online"; fn.load_pct = 55; tn.load_pct = min(tn.load_pct+35, 85)
+                g["traffic_rerouted"] = True; g["critical_prioritised"] = True
+                for inc in s["incidents"]:
+                    if inc.priority == 1 and inc.status == "open": inc.status = "resolved"
+                return 0.30, f"Traffic rerouted {fn.id} → {tn.id}. Critical incident resolved."
+            return 0.0, "Reroute had no effect."
 
-        elif action.action_type == "reroute_traffic":
-            node_id = action.node_id or ""
-            backup = action.backup_node_id or ""
-            if self.task_id == "hard" and node_id == self.target["node_id"] and backup == self.target["backup_node_id"]:
-                self.nodes[node_id]["status"] = "stable"
-                self.nodes[node_id]["cpu_load"] = 72
-                reward += 0.25
-                self.milestones["rerouted"] = True
-                msg = f"Traffic rerouted from {node_id} to {backup}."
-            else:
-                reward -= 0.08
-                msg = "Invalid reroute request."
+        if t == "send_customer_update":
+            inc = self._find_incident(p.get("incident_id",""))
+            if not inc: return -0.05, "Incident not found."
+            if "customer_updated" in g and not g["customer_updated"]:
+                g["customer_updated"] = True
+                return 0.10, f"Customer update sent for {inc.id}."
+            return 0.02, "Duplicate update."
 
-        elif action.action_type == "reserve_part":
-            depot = action.depot_id or ""
-            part = action.part_name or ""
-            qty = int(action.qty or 1)
-            available = self.inventory.get(depot, {}).get(part, 0)
-            if available >= qty:
-                self.inventory[depot][part] -= qty
-                correct = False
-                if self.task_id == "medium":
-                    correct = depot == self.target["depot_id"] and part == self.target["part_name"]
-                elif self.task_id == "hard":
-                    correct = depot == self.target["depot_id"] and part == self.target["part_name"]
-                reward += 0.22 if correct else -0.04
-                if correct:
-                    self.milestones["reserved"] = True
-                msg = f"Reserved {qty} {part} from {depot}."
-            else:
-                reward -= 0.12
-                msg = f"Part {part} unavailable at {depot}."
+        if t == "close_ticket":
+            inc = self._find_incident(p.get("incident_id",""))
+            if not inc: return -0.05, "Incident not found."
+            if inc.status == "resolved":
+                inc.status = "closed"
+                if all(i.status == "closed" for i in s["incidents"]):
+                    if "ticket_closed" in g: g["ticket_closed"] = True
+                    if "all_tickets_closed" in g: g["all_tickets_closed"] = True
+                    return 0.20, f"{inc.id} closed. ALL INCIDENTS RESOLVED ✓"
+                return 0.10, f"{inc.id} closed."
+            if inc.status == "closed": return -0.02, "Already closed."
+            return -0.10, f"Cannot close — status is '{inc.status}', must be 'resolved' first."
 
-        elif action.action_type == "dispatch_technician":
-            tech_id = action.tech_id or ""
-            ticket_id = action.ticket_id or ""
-            tech = self.techs.get(tech_id)
-            if tech and ticket_id in self.incidents and tech["available"]:
-                tech["available"] = False
-                correct = False
-                if self.task_id == "medium":
-                    correct = tech_id == self.target["tech_id"] and ticket_id == self.target["ticket_id"] and self.milestones["reserved"]
-                elif self.task_id == "hard":
-                    correct = tech_id == self.target["tech_id"] and ticket_id == self.target["normal_ticket"] and self.milestones["reserved"]
-                reward += 0.24 if correct else -0.05
-                if correct:
-                    self.milestones["dispatched"] = True
-                    self.incidents[ticket_id]["service_restored"] = True
-                msg = f"Dispatched {tech_id} to {ticket_id}."
-            else:
-                reward -= 0.10
-                msg = "Invalid technician dispatch."
+        return -0.05, f"Unknown action '{t}'."
 
-        elif action.action_type == "send_customer_update":
-            ticket_id = action.ticket_id or ""
-            template = action.message_template
-            if ticket_id in self.incidents and template:
-                correct = False
-                if self.task_id == "hard":
-                    correct = ticket_id == self.target["critical_ticket"] and template in {"investigating", "service_restored"}
-                else:
-                    correct = template in {"investigating", "service_restored", "tech_dispatched"}
-                reward += 0.08 if correct else -0.02
-                if correct:
-                    self.milestones["updated"] = True
-                msg = f"Sent {template} update for {ticket_id}."
-            else:
-                reward -= 0.06
-                msg = "Invalid customer update."
+    def _compute_grader_score(self) -> float:
+        g = self._state["_grader"]
+        if not g: return 0.0
+        achieved = sum(1 for v in g.values() if v)
+        base = achieved / len(g)
+        if base >= 1.0:
+            efficiency = max(0.0, 1.0 - self._step_count / self._state["max_steps"])
+            return min(1.0, base + efficiency * 0.15)
+        return round(base, 4)
 
-        elif action.action_type == "close_incident":
-            ticket_id = action.ticket_id or ""
-            incident = self.incidents.get(ticket_id)
-            if incident:
-                if incident["service_restored"]:
-                    incident["status"] = "closed"
-                    reward += 0.20
-                    msg = f"Closed {ticket_id}."
-                else:
-                    reward -= 0.20
-                    msg = f"Cannot close {ticket_id}; service not restored."
-                self.milestones["closed"] = all(x["status"] == "closed" for x in self.incidents.values())
-            else:
-                reward -= 0.08
-                msg = "Unknown ticket."
-
-        else:
-            reward -= 0.10
-            msg = "Unsupported action."
-
-        reward = round(reward, 3)
-        self.score = round(max(0.0, min(1.0, self.score + max(reward, -0.2))), 3)
-        self.history.append(f"step={self.step_count} action={action.action_type} reward={reward} msg={msg}")
-
-        if self.task_id == "medium" and self.milestones["dispatched"]:
-            self.incidents[self.target["ticket_id"]]["status"] = "resolved_pending_close"
-
-        if self.step_count >= self.max_steps:
-            self.done = True
-            self.history.append("Episode ended: max steps reached")
-
-        if self._all_success_conditions_met():
-            self.done = True
-            self.score = max(self.score, 1.0)
-            self.history.append("Episode ended: task complete")
-
-        return StepResult(observation=self._observation(msg), reward=reward, done=self.done, info=info)
-
-    def state(self) -> LastMileOpsState:
-        return LastMileOpsState(
-            episode_id=self.episode_id,
-            task_id=self.task_id,
-            task_name=self.task_name,
-            done=self.done,
-            score=self.score,
-            step_count=self.step_count,
-            max_steps=self.max_steps,
-            milestones=self.milestones,
-            raw_state={
-                "incidents": self.incidents,
-                "nodes": self.nodes,
-                "techs": self.techs,
-                "inventory": self.inventory,
-                "visible_logs": self.visible_logs,
-            },
+    def _build_obs(self, message="") -> Observation:
+        s = self._state
+        return Observation(
+            task_id=s.get("task_id",""), step=self._step_count,
+            max_steps=s.get("max_steps",0), done=self._done,
+            incidents=s.get("incidents",[]), network=s.get("network",[]),
+            technicians=s.get("technicians",[]), inventory=s.get("inventory",[]),
+            action_log=list(self._action_log[-5:]), message=message,
         )
 
-    def _all_success_conditions_met(self) -> bool:
-        if self.task_id == "easy":
-            inc = self.incidents[self.target["ticket_id"]]
-            return inc["service_restored"] and inc["status"] == "closed"
-        if self.task_id == "medium":
-            inc = self.incidents[self.target["ticket_id"]]
-            return self.milestones["reserved"] and self.milestones["dispatched"] and inc["status"] == "closed"
-        crit = self.incidents[self.target["critical_ticket"]]
-        norm = self.incidents[self.target["normal_ticket"]]
-        return (
-            self.milestones["rerouted"]
-            and self.milestones["rebooted"]
-            and self.milestones["reserved"]
-            and self.milestones["dispatched"]
-            and self.milestones["updated"]
-            and crit["status"] == "closed"
-            and norm["status"] == "closed"
-        )
-
-    def _ticket_node(self, ticket_id: str | None) -> str | None:
-        if not ticket_id or ticket_id not in self.incidents:
-            return None
-        return self.incidents[ticket_id]["affected_node"]
-
-    def _observation(self, message: str) -> LastMileOpsObservation:
-        return LastMileOpsObservation(
-            task_id=self.task_id,
-            task_name=self.task_name,
-            prompt=self.prompt,
-            message=message,
-            incidents=[IncidentSummary(**x) for x in self.incidents.values()],
-            nodes=[NodeSummary(**x) for x in self.nodes.values()],
-            technicians=[TechnicianSummary(**x) for x in self.techs.values()],
-            inventory=[InventorySummary(depot_id=depot, items=items) for depot, items in self.inventory.items()],
-            visible_logs=self.visible_logs,
-            history=self.history[-8:],
-            progress_score=self.score,
-            step_count=self.step_count,
-            max_steps=self.max_steps,
-        )
+    def _find_node(self, nid):
+        return next((n for n in self._state.get("network",[]) if n.id==nid), None)
+    def _find_tech(self, tid):
+        return next((t for t in self._state.get("technicians",[]) if t.id==tid), None)
+    def _find_part(self, pid):
+        return next((p for p in self._state.get("inventory",[]) if p.id==pid), None)
+    def _find_incident(self, iid):
+        return next((i for i in self._state.get("incidents",[]) if i.id==iid), None)
