@@ -1,17 +1,16 @@
-from __future__ import annotations
-
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Any, Dict
 
-from models import LastMileOpsAction, ResetResult, StepResult, LastMileOpsState
-from server.environment import LastMileOpsEnvironment
+from .models import Action, Observation, StepResult
+from .environment import LastMileOpsEnv, ACTION_SPACE
 
-app = FastAPI(title="LastMileOps Environment", version="1.0.0")
+app = FastAPI(
+    title="LastMileOps — Telecom NOC OpenEnv",
+    description="Real-world telecom network operations environment for AI agent training.",
+    version="1.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,7 +19,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-env = LastMileOpsEnvironment()
+env = LastMileOpsEnv()
+
+
+class ResetRequest(BaseModel):
+    task_id: str = "easy"
 
 
 @app.get("/health")
@@ -28,27 +31,54 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/reset", response_model=ResetResult)
-def reset(task_id: str = "easy"):
+@app.get("/tasks")
+def list_tasks():
+    return {
+        "tasks": [
+            {
+                "id": "easy",
+                "name": "Single-site remote fix",
+                "difficulty": "easy",
+                "max_steps": 10,
+                "description": "Identify the fault, run diagnostics, reboot the ONT, close the ticket.",
+            },
+            {
+                "id": "medium",
+                "name": "Cabinet failure dispatch",
+                "difficulty": "medium",
+                "max_steps": 15,
+                "description": "Diagnose cabinet fault, reserve correct spare, dispatch right technician, close ticket.",
+            },
+            {
+                "id": "hard",
+                "name": "Regional storm response",
+                "difficulty": "hard",
+                "max_steps": 20,
+                "description": "Multi-incident storm response: reroute traffic, dispatch, reserve parts, update customers, close all.",
+            },
+        ]
+    }
+
+
+@app.get("/actions")
+def list_actions():
+    return {"action_space": ACTION_SPACE}
+
+
+@app.post("/reset", response_model=Observation)
+def reset(req: ResetRequest):
     try:
-        result = env.reset(task_id=task_id)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        obs = env.reset(task_id=req.task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return obs
 
 
 @app.post("/step", response_model=StepResult)
-def step(action: LastMileOpsAction):
-    try:
-        result = env.step(action)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def step(action: Action):
+    return env.step(action)
 
 
-@app.get("/state", response_model=LastMileOpsState)
-def state():
-    try:
-        return env.state()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/state")
+def state() -> Dict[str, Any]:
+    return env.state()
