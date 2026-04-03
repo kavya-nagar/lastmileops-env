@@ -7,6 +7,7 @@ ENV PATH="/home/user/.local/bin:$PATH"
 WORKDIR /app
 
 COPY --chown=user pyproject.toml .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -e .
 
 COPY --chown=user . /app
