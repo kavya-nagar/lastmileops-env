@@ -13,7 +13,7 @@ for pkg in ["requests", "openai"]:
 import requests
 from openai import OpenAI
 
-# ── Environment variables (DO NOT hardcode real keys) ──────────────────────
+# ── Environment variables ──────────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "<your-active-api-base-url>")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "<your-active-model-name>")
 HF_TOKEN     = os.environ.get("HF_TOKEN")
@@ -22,52 +22,56 @@ client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
 BASE_URL = os.environ.get("ENV_BASE_URL", "https://kavyanagar-lastmileops-env.hf.space")
 
-TASKS = ["easy", "medium", "hard"]
+TASKS     = ["easy", "medium", "hard"]
 MAX_STEPS = {"easy": 10, "medium": 15, "hard": 20}
+
+TASK_NAMES = {
+    "easy":   "Single-site remote fix",
+    "medium": "Cabinet failure dispatch",
+    "hard":   "Regional storm response",
+}
+
+TASK_PROMPTS = {
+    "easy":   "A business customer is offline. Identify the affected node, run the right remote diagnostic, reboot the correct device, then close the ticket.",
+    "medium": "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare part, dispatch the right technician, and close the ticket only after repair.",
+    "hard":   "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet outage, dispatch the right technician, send the right update, restore service, and close all incidents safely.",
+}
+
+
+def log(data: dict):
+    print(json.dumps(data), flush=True)
 
 
 def reset_env(task_id: str) -> dict:
-    resp = requests.post(f"{BASE_URL}/reset", json={"task_id": task_id})
+    resp = requests.post(f"{BASE_URL}/reset", json={"task_id": task_id}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def step_env(action_type: str, params: dict) -> dict:
     payload = {"action_type": action_type, "params": params}
-    resp = requests.post(f"{BASE_URL}/step", json=payload)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_state() -> dict:
-    resp = requests.get(f"{BASE_URL}/state")
+    resp = requests.post(f"{BASE_URL}/step", json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def build_prompt(obs: dict) -> str:
-    incidents = obs.get("incidents", [])
-    network   = obs.get("network", [])
-    techs     = obs.get("technicians", [])
-    inventory = obs.get("inventory", [])
-    log       = obs.get("action_log", [])
-
     return f"""You are a Telecom NOC engineer. Resolve all incidents efficiently.
 
 INCIDENTS:
-{json.dumps(incidents, indent=2)}
+{json.dumps(obs.get("incidents", []), indent=2)}
 
 NETWORK NODES:
-{json.dumps(network, indent=2)}
+{json.dumps(obs.get("network", []), indent=2)}
 
 TECHNICIANS:
-{json.dumps(techs, indent=2)}
+{json.dumps(obs.get("technicians", []), indent=2)}
 
 INVENTORY:
-{json.dumps(inventory, indent=2)}
+{json.dumps(obs.get("inventory", []), indent=2)}
 
 RECENT ACTIONS:
-{json.dumps(log, indent=2)}
+{json.dumps(obs.get("action_log", []), indent=2)}
 
 AVAILABLE ACTIONS:
 - run_diagnostic: {{"node_id": "<id>"}}
@@ -85,53 +89,42 @@ Respond with ONLY a JSON object like:
 
 
 def get_llm_action(obs: dict) -> dict:
-    prompt = build_prompt(obs)
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": "You are an expert NOC engineer. Always respond with valid JSON only."},
-                {"role": "user",   "content": prompt},
+                {"role": "user",   "content": build_prompt(obs)},
             ],
             temperature=0.0,
             max_tokens=200,
         )
         raw = response.choices[0].message.content.strip()
-        # Strip markdown code blocks if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
         return json.loads(raw.strip())
     except Exception as e:
-        print(f"LLM ERROR: {e}", file=sys.stderr)
+        print(f"LLM ERROR: {e}", file=sys.stderr, flush=True)
         return {"action_type": "noop", "params": {}}
 
 
-def run_task(task_id: str):
+def run_task(task_id: str) -> float:
     obs = reset_env(task_id)
 
-    task_name = {"easy": "Single-site remote fix",
-                 "medium": "Cabinet failure dispatch",
-                 "hard": "Regional storm response"}[task_id]
-
-    prompt_text = {"easy":   "A business customer is offline. Identify the affected node, run the right remote diagnostic, reboot the correct device, then close the ticket.",
-                   "medium": "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare part, dispatch the right technician, and close the ticket only after repair.",
-                   "hard":   "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet outage, dispatch the right technician, send the right update, restore service, and close all incidents safely."}[task_id]
-
-    print(json.dumps({
+    log({
         "event":   "[START]",
         "task_id": task_id,
-        "task":    task_name,
-        "prompt":  prompt_text,
-    }))
+        "task":    TASK_NAMES[task_id],
+        "prompt":  TASK_PROMPTS[task_id],
+    })
 
     step_num  = 0
     done      = False
     score     = 0.0
-    max_steps = MAX_STEPS[task_id]
 
-    while not done and step_num < max_steps:
+    while not done and step_num < MAX_STEPS[task_id]:
         action = get_llm_action(obs)
         result = step_env(action.get("action_type", "noop"), action.get("params", {}))
 
@@ -142,7 +135,7 @@ def run_task(task_id: str):
         message  = result.get("info", {}).get("message", "")
         obs      = result.get("observation", obs)
 
-        print(json.dumps({
+        log({
             "event":   "[STEP]",
             "task_id": task_id,
             "step":    step_num,
@@ -151,31 +144,31 @@ def run_task(task_id: str):
             "done":    done,
             "score":   score,
             "message": message,
-        }))
+        })
 
-    print(json.dumps({
+    log({
         "event":   "[END]",
         "task_id": task_id,
         "steps":   step_num,
         "score":   score,
         "done":    done,
-    }))
+    })
 
     return score
 
 
 if __name__ == "__main__":
-    print(f"Running LastMileOps inference against: {BASE_URL}")
+    print(f"Running LastMileOps inference against: {BASE_URL}", flush=True)
     results = {}
     for task in TASKS:
-        print(f"\nRunning task: {task}")
+        print(f"\nRunning task {task}", flush=True)
         try:
             results[task] = run_task(task)
         except Exception as e:
-            print(f"Task {task} failed: {e}", file=sys.stderr)
+            print(f"Task {task} failed: {e}", file=sys.stderr, flush=True)
             results[task] = 0.0
 
-    print("\n===== FINAL SCORES =====")
+    print("\n===== FINAL SCORES =====", flush=True)
     for task, score in results.items():
-        print(f"{task}: {score:.4f}")
-    print(f"Average: {sum(results.values()) / len(results):.4f}")
+        print(f"{task}: {score:.4f}", flush=True)
+    print(f"Average: {sum(results.values()) / len(results):.4f}", flush=True)
