@@ -1,15 +1,13 @@
 FROM python:3.12-slim
 
-RUN useradd -m -u 1000 user
-USER user
-ENV PATH="/home/user/.local/bin:$PATH"
-
 WORKDIR /app
 
-COPY --chown=user . /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir fastapi uvicorn[standard] openai pydantic pyyaml
+COPY . .
+
+ENV PYTHONPATH=/app
 
 EXPOSE 7860
 
