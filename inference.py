@@ -38,10 +38,6 @@ TASK_PROMPTS = {
 }
 
 
-def log(data: dict):
-    print(json.dumps(data), flush=True)
-
-
 def reset_env(task_id: str) -> dict:
     resp = requests.post(f"{BASE_URL}/reset", json={"task_id": task_id}, timeout=30)
     resp.raise_for_status()
@@ -113,12 +109,12 @@ def get_llm_action(obs: dict) -> dict:
 def run_task(task_id: str) -> float:
     obs = reset_env(task_id)
 
-    log({
-        "event":   "[START]",
+    # EXACT required [START] format
+    print("[START] " + json.dumps({
         "task_id": task_id,
         "task":    TASK_NAMES[task_id],
         "prompt":  TASK_PROMPTS[task_id],
-    })
+    }), flush=True)
 
     step_num  = 0
     done      = False
@@ -135,8 +131,8 @@ def run_task(task_id: str) -> float:
         message  = result.get("info", {}).get("message", "")
         obs      = result.get("observation", obs)
 
-        log({
-            "event":   "[STEP]",
+        # EXACT required [STEP] format
+        print("[STEP] " + json.dumps({
             "task_id": task_id,
             "step":    step_num,
             "action":  action,
@@ -144,31 +140,24 @@ def run_task(task_id: str) -> float:
             "done":    done,
             "score":   score,
             "message": message,
-        })
+        }), flush=True)
 
-    log({
-        "event":   "[END]",
+    # EXACT required [END] format
+    print("[END] " + json.dumps({
         "task_id": task_id,
         "steps":   step_num,
         "score":   score,
         "done":    done,
-    })
+    }), flush=True)
 
     return score
 
 
 if __name__ == "__main__":
-    print(f"Running LastMileOps inference against: {BASE_URL}", flush=True)
     results = {}
     for task in TASKS:
-        print(f"\nRunning task {task}", flush=True)
         try:
             results[task] = run_task(task)
         except Exception as e:
             print(f"Task {task} failed: {e}", file=sys.stderr, flush=True)
             results[task] = 0.0
-
-    print("\n===== FINAL SCORES =====", flush=True)
-    for task, score in results.items():
-        print(f"{task}: {score:.4f}", flush=True)
-    print(f"Average: {sum(results.values()) / len(results):.4f}", flush=True)
