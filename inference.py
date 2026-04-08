@@ -3,25 +3,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-import subprocess
-
-for pkg in ["requests", "openai"]:
-    try:
-        __import__(pkg.replace("-", "_"))
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
 import requests
+from openai import OpenAI
 
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-
-
-API_BASE_URL = os.environ.get("API_BASE_URL", "")
-MODEL_NAME = os.environ.get("MODEL_NAME", "")
-HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
+API_BASE_URL = os.environ["API_BASE_URL"] if "API_BASE_URL" in os.environ else ""
+API_KEY = os.environ["API_KEY"] if "API_KEY" in os.environ else ""
+MODEL_NAME = os.environ.get("MODEL_NAME") or os.environ.get("MODEL") or "gpt-4o-mini"
 BASE_URL = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860")
 
 TASKS = ["easy", "medium", "hard"]
@@ -92,9 +80,12 @@ def step_env(action_type: str, params: dict) -> dict:
     return resp.json()
 
 
-def build_prompt(obs: dict) -> str:
+def build_prompt(obs: dict, task_id: str) -> str:
     return f"""
-You are a Telecom NOC engineer. Resolve all incidents efficiently.
+You are a Telecom NOC engineer. Resolve this task efficiently.
+
+TASK:
+{TASK_PROMPTS[task_id]}
 
 INCIDENTS:
 {json.dumps(obs.get("incidents", []), indent=2)}
@@ -121,27 +112,28 @@ AVAILABLE ACTIONS:
 - close_ticket: {{"incident_id": ""}}
 - noop: {{}}
 
-Return ONLY valid JSON like:
+Return ONLY valid JSON with this shape:
 {{"action_type":"run_diagnostic","params":{{"node_id":"ONT-007"}}}}
 """.strip()
 
 
-def get_llm_action(obs: dict) -> dict | None:
-    if not (OpenAI and HF_TOKEN and API_BASE_URL and MODEL_NAME):
+def get_llm_action(obs: dict, task_id: str) -> dict | None:
+    if not API_BASE_URL or not API_KEY:
+        print("LLM ERROR: missing API_BASE_URL or API_KEY", file=sys.stderr, flush=True)
         return None
 
     try:
-        client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+        client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert NOC engineer. Respond with JSON only.",
+                    "content": "You are an expert telecom NOC engineer. Output JSON only.",
                 },
                 {
                     "role": "user",
-                    "content": build_prompt(obs),
+                    "content": build_prompt(obs, task_id),
                 },
             ],
             temperature=0.0,
@@ -171,7 +163,7 @@ def get_llm_action(obs: dict) -> dict | None:
 
 
 def choose_action(task_id: str, obs: dict, step_num: int) -> dict:
-    llm_action = get_llm_action(obs)
+    llm_action = get_llm_action(obs, task_id)
     if isinstance(llm_action, dict) and "action_type" in llm_action:
         return {
             "action_type": llm_action.get("action_type", "noop"),
@@ -262,14 +254,11 @@ def run_task(task_id: str) -> float:
 
 
 if __name__ == "__main__":
-    results = {}
-
     for task in TASKS:
         try:
-            results[task] = run_task(task)
+            run_task(task)
         except Exception as e:
             print(f"TASK ERROR: {e}", file=sys.stderr, flush=True)
-            results[task] = 0.01
             print(
                 "[START] "
                 + json.dumps(
