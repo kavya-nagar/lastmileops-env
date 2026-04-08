@@ -12,10 +12,13 @@ for pkg in ["requests", "openai"]:
 import requests
 from openai import OpenAI
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "<your-active-api-base-url>")
-MODEL_NAME = os.environ.get("MODEL_NAME", "<your-active-model-name>")
-HF_TOKEN = os.environ.get("HF_TOKEN")
+API_BASE_URL = os.environ.get("API_BASE_URL", "")
+MODEL_NAME = os.environ.get("MODEL_NAME", "")
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
 BASE_URL = os.environ.get("ENV_BASE_URL", "https://kavyanagar-lastmileops-env.hf.space")
+
+if not HF_TOKEN:
+    raise RuntimeError("Missing HF_TOKEN or OPENAI_API_KEY")
 
 client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
@@ -35,12 +38,12 @@ TASK_PROMPTS = {
 }
 
 
-def clamp_score(x):
+def clamp_unit(x):
     try:
         x = float(x)
     except Exception:
         x = 0.01
-    return max(0.01, min(0.99, x))
+    return round(max(0.01, min(0.99, x)), 4)
 
 
 def reset_env(task_id: str) -> dict:
@@ -110,19 +113,24 @@ def get_llm_action(obs: dict) -> dict:
             max_tokens=200,
         )
         raw = response.choices[0].message.content.strip()
+
         if raw.startswith("```"):
             parts = raw.split("```")
             if len(parts) >= 2:
                 raw = parts[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+
         action = json.loads(raw.strip())
+
         if not isinstance(action, dict):
             return {"action_type": "noop", "params": {}}
+
         return {
             "action_type": action.get("action_type", "noop"),
             "params": action.get("params", {}) or {},
         }
+
     except Exception as e:
         print(f"LLM ERROR: {e}", file=sys.stderr, flush=True)
         return {"action_type": "noop", "params": {}}
@@ -152,7 +160,7 @@ def run_task(task_id: str) -> float:
         except Exception as e:
             print(f"STEP ERROR: {e}", file=sys.stderr, flush=True)
             result = {
-                "reward": 0.0,
+                "reward": 0.01,
                 "done": True,
                 "score": 0.01,
                 "info": {"message": f"step failed: {e}"},
@@ -160,9 +168,9 @@ def run_task(task_id: str) -> float:
             }
 
         step_num += 1
-        reward = result.get("reward", 0.0)
+        reward = clamp_unit(result.get("reward", 0.01))
         done = bool(result.get("done", False))
-        score = clamp_score(result.get("score", 0.01))
+        score = clamp_unit(result.get("score", 0.01))
         message = result.get("info", {}).get("message", "")
         obs = result.get("observation", obs)
 
@@ -179,18 +187,18 @@ def run_task(task_id: str) -> float:
     print("[END] " + json.dumps({
         "task_id": task_id,
         "steps": step_num,
-        "score": clamp_score(score),
+        "score": clamp_unit(score),
         "done": done,
     }), flush=True)
 
-    return clamp_score(score)
+    return clamp_unit(score)
 
 
 if __name__ == "__main__":
     results = {}
     for task in TASKS:
         try:
-            results[task] = clamp_score(run_task(task))
+            results[task] = run_task(task)
         except Exception as e:
             print(f"TASK ERROR: {e}", file=sys.stderr, flush=True)
             results[task] = 0.01
