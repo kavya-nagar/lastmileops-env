@@ -3,7 +3,7 @@ from typing import Any, Dict, Tuple
 from .models import Action, Observation, StepResult, Incident, NetworkNode, Technician, SparePart
 
 
-def _strict_score(x: float) -> float:
+def _strict_unit(x: float) -> float:
     try:
         x = float(x)
     except Exception:
@@ -19,7 +19,7 @@ ACTION_SPACE = {
     "reroute_traffic": "Reroute traffic between nodes. params: {from_node_id, to_node_id}",
     "send_customer_update": "Notify customer. params: {incident_id, message_type}",
     "close_ticket": "Close resolved incident. params: {incident_id}",
-    "noop": "No action (penalised).",
+    "noop": "No action.",
 }
 
 SCENARIOS = {
@@ -173,25 +173,26 @@ class LastMileOpsEnv:
         if self._done:
             return StepResult(
                 observation=self._build_obs(),
-                reward=0.0,
+                reward=_strict_unit(0.01),
                 done=True,
-                score=_strict_score(self._score),
+                score=_strict_unit(self._score),
                 info={"message": "Episode done"},
             )
 
         self._step_count += 1
-        reward, msg = self._apply_action(action)
+        raw_reward, msg = self._apply_action(action)
+        reward = _strict_unit(raw_reward)
         self._action_log.append(f"[{self._step_count}] {action.action_type}({action.params}) -> {msg}")
-        self._score = _strict_score(self._compute_grader_score())
+        self._score = _strict_unit(self._compute_grader_score())
 
         all_closed = all(i.status == "closed" for i in self._state["incidents"])
         self._done = all_closed or self._step_count >= self._state["max_steps"]
 
         return StepResult(
             observation=self._build_obs(message=msg),
-            reward=round(reward, 4),
+            reward=reward,
             done=self._done,
-            score=_strict_score(self._score),
+            score=_strict_unit(self._score),
             info={
                 "step": self._step_count,
                 "grader": self._state["_grader"],
@@ -205,7 +206,7 @@ class LastMileOpsEnv:
             "step": self._step_count,
             "max_steps": self._state.get("max_steps", 0),
             "done": self._done,
-            "score": _strict_score(self._score),
+            "score": _strict_unit(self._score),
             "grader_checkpoints": self._state.get("_grader", {}),
             "incidents": [i.model_dump() for i in self._state.get("incidents", [])],
             "network": [n.model_dump() for n in self._state.get("network", [])],
@@ -221,12 +222,12 @@ class LastMileOpsEnv:
         g = self._state["_grader"]
 
         if t == "noop":
-            return -0.04, "No-op used."
+            return 0.01, "No-op used."
 
         if t == "run_diagnostic":
             node = self._find_node(p.get("node_id", ""))
             if not node:
-                return -0.05, f"Node '{p.get('node_id')}' not found."
+                return 0.01, f"Node '{p.get('node_id')}' not found."
             if node.status in ("offline", "degraded", "overloaded"):
                 if "diagnostic_run" in g and not g["diagnostic_run"]:
                     g["diagnostic_run"] = True
@@ -238,7 +239,7 @@ class LastMileOpsEnv:
         if t == "reboot_device":
             node = self._find_node(p.get("node_id", ""))
             if not node:
-                return -0.05, "Node not found."
+                return 0.01, "Node not found."
             if node.type == "ont" and node.status == "offline":
                 node.status = "online"
                 node.load_pct = 30
@@ -249,15 +250,15 @@ class LastMileOpsEnv:
                         inc.status = "resolved"
                 return 0.25, f"Rebooted {node.id} -> online. Incident resolved."
             if node.status == "online":
-                return -0.05, "Already online."
-            return 0.0, f"Reboot had no effect on {node.id}."
+                return 0.01, "Already online."
+            return 0.02, f"Reboot had no effect on {node.id}."
 
         if t == "dispatch_technician":
             tech = self._find_tech(p.get("tech_id", ""))
             if not tech:
-                return -0.05, "Technician not found."
+                return 0.01, "Technician not found."
             if not tech.available:
-                return -0.08, f"{tech.name} unavailable."
+                return 0.01, f"{tech.name} unavailable."
             bonus = 0.0
             if tech.skill == "electronics" and s["task_id"] in ("medium", "hard"):
                 if "correct_tech_dispatched" in g and not g["correct_tech_dispatched"]:
@@ -273,9 +274,9 @@ class LastMileOpsEnv:
         if t == "reserve_part":
             part = self._find_part(p.get("part_id", ""))
             if not part:
-                return -0.05, "Part not found."
+                return 0.01, "Part not found."
             if part.quantity - part.reserved <= 0:
-                return -0.08, f"{part.name} out of stock."
+                return 0.01, f"{part.name} out of stock."
             part.reserved += 1
             if p.get("part_id") == "P2" and s["task_id"] in ("medium", "hard"):
                 if "correct_part_reserved" in g and not g["correct_part_reserved"]:
@@ -287,7 +288,7 @@ class LastMileOpsEnv:
             fn = self._find_node(p.get("from_node_id", ""))
             tn = self._find_node(p.get("to_node_id", ""))
             if not fn or not tn:
-                return -0.05, "Node(s) not found."
+                return 0.01, "Node(s) not found."
             if fn.status == "overloaded" and tn.type == "backup":
                 fn.status = "online"
                 fn.load_pct = 55
@@ -298,12 +299,12 @@ class LastMileOpsEnv:
                     if inc.priority == 1 and inc.status == "open":
                         inc.status = "resolved"
                 return 0.30, f"Traffic rerouted {fn.id} -> {tn.id}. Critical incident resolved."
-            return 0.0, "Reroute had no effect."
+            return 0.02, "Reroute had no effect."
 
         if t == "send_customer_update":
             inc = self._find_incident(p.get("incident_id", ""))
             if not inc:
-                return -0.05, "Incident not found."
+                return 0.01, "Incident not found."
             if "customer_updated" in g and not g["customer_updated"]:
                 g["customer_updated"] = True
                 return 0.10, f"Customer update sent for {inc.id}."
@@ -312,7 +313,7 @@ class LastMileOpsEnv:
         if t == "close_ticket":
             inc = self._find_incident(p.get("incident_id", ""))
             if not inc:
-                return -0.05, "Incident not found."
+                return 0.01, "Incident not found."
             if inc.status == "resolved":
                 inc.status = "closed"
                 if all(i.status == "closed" for i in s["incidents"]):
@@ -323,10 +324,10 @@ class LastMileOpsEnv:
                     return 0.20, f"{inc.id} closed. ALL INCIDENTS RESOLVED"
                 return 0.10, f"{inc.id} closed."
             if inc.status == "closed":
-                return -0.02, "Already closed."
-            return -0.10, f"Cannot close - status is '{inc.status}', must be 'resolved' first."
+                return 0.01, "Already closed."
+            return 0.01, f"Cannot close - status is '{inc.status}', must be 'resolved' first."
 
-        return -0.05, f"Unknown action '{t}'."
+        return 0.01, f"Unknown action '{t}'."
 
     def _compute_grader_score(self) -> float:
         g = self._state["_grader"]
@@ -342,7 +343,7 @@ class LastMileOpsEnv:
         else:
             raw_score = base
 
-        return _strict_score(raw_score)
+        return _strict_unit(raw_score)
 
     def _build_obs(self, message: str = "") -> Observation:
         s = self._state
