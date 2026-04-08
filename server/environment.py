@@ -104,7 +104,7 @@ class LastMileOpsEnv:
     def __init__(self):
         self._state: Dict = {}
         self._step_count = 0
-        self._score = 0.0
+        self._score = 0.01  # <--- Start at 0.01 instead of 0.0
         self._done = False
         self._action_log = []
 
@@ -113,7 +113,7 @@ class LastMileOpsEnv:
             raise ValueError(f"Unknown task '{task_id}'. Choose: {list(SCENARIOS)}")
         self._state = SCENARIOS[task_id]()
         self._step_count = 0
-        self._score = 0.0
+        self._score = 0.01  # <--- Start at 0.01 instead of 0.0
         self._done = False
         self._action_log = []
         return self._build_obs()
@@ -241,13 +241,20 @@ class LastMileOpsEnv:
 
     def _compute_grader_score(self) -> float:
         g = self._state["_grader"]
-        if not g: return 0.0
+        if not g: return 0.01
+        
         achieved = sum(1 for v in g.values() if v)
         base = achieved / len(g)
+        
         if base >= 1.0:
             efficiency = max(0.0, 1.0 - self._step_count / self._state["max_steps"])
-            return min(1.0, base + efficiency * 0.15)
-        return round(base, 4)
+            raw_score = base + efficiency * 0.15
+        else:
+            raw_score = base
+
+        # <--- Clamp strictly between 0.01 and 0.99 --->
+        final_score = max(0.01, min(0.99, raw_score))
+        return round(final_score, 4)
 
     def _build_obs(self, message="") -> Observation:
         s = self._state
