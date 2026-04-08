@@ -1,5 +1,5 @@
 name: lastmileops-env
-version: "1.0.1"
+version: "1.0.2"
 description: >
   LastMileOps is a telecom field-operations environment where an AI agent manages
   network incidents, dispatches technicians, reroutes traffic, reserves parts,
@@ -8,7 +8,7 @@ author: Kavya Nagar
 license: MIT
 
 environment:
-  base_url: http://0.0.0.0:8000
+  base_url: http://127.0.0.1:7860
   endpoints:
     reset: /reset
     step: /step
@@ -45,4 +45,4 @@ reward:
 
 docker:
   image: lastmileops-env
-  port: 8000
+  port: 7860
