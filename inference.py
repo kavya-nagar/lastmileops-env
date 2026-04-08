@@ -176,16 +176,14 @@ def run_task(task_id: str) -> float:
             "message": message,
         }), flush=True)
 
-    score = clamp_score(score)
-
     print("[END] " + json.dumps({
         "task_id": task_id,
         "steps": step_num,
-        "score": score,
+        "score": clamp_score(score),
         "done": done,
     }), flush=True)
 
-    return score
+    return clamp_score(score)
 
 
 if __name__ == "__main__":

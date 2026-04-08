@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+
 class Incident(BaseModel):
     id: str
     customer_id: str
@@ -11,11 +12,13 @@ class Incident(BaseModel):
     status: str
     priority: int
 
+
 class NetworkNode(BaseModel):
     id: str
     type: str
     status: str
     load_pct: int
+
 
 class Technician(BaseModel):
     id: str
@@ -24,11 +27,13 @@ class Technician(BaseModel):
     available: bool
     location: str
 
+
 class SparePart(BaseModel):
     id: str
     name: str
     quantity: int
     reserved: int
+
 
 class Observation(BaseModel):
     task_id: str
@@ -42,13 +47,15 @@ class Observation(BaseModel):
     action_log: List[str] = Field(default_factory=list)
     message: str = ""
 
+
 class Action(BaseModel):
     action_type: str
     params: Dict[str, Any] = Field(default_factory=dict)
 
+
 class StepResult(BaseModel):
     observation: Observation
-    reward: float = Field(ge=0.0, le=1.0)
+    reward: float
     done: bool
-    score: float = Field(ge=0.0, le=1.0)
+    score: float = Field(gt=0.0, lt=1.0)
     info: Dict[str, Any] = Field(default_factory=dict)
