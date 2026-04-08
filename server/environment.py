@@ -330,20 +330,21 @@ class LastMileOpsEnv:
         return 0.01, f"Unknown action '{t}'."
 
     def _compute_grader_score(self) -> float:
-        g = self._state["_grader"]
-        if not g:
-            return 0.01
+    g = self._state["_grader"]
+    if not g:
+        return 0.01
 
-        achieved = sum(1 for v in g.values() if v)
-        base = achieved / len(g)
+    achieved = sum(1 for v in g.values() if v)
+    progress = achieved / len(g)
 
-        if base >= 1.0:
-            efficiency = max(0.0, 1.0 - self._step_count / self._state["max_steps"])
-            raw_score = base + efficiency * 0.15
-        else:
-            raw_score = base
+    efficiency = max(0.0, 1.0 - self._step_count / self._state["max_steps"])
 
-        return _strict_unit(raw_score)
+    # Strictly bounded by construction:
+    # min = 0.01
+    # max = 0.01 + 0.80 + 0.18 = 0.99
+    raw_score = 0.01 + (progress * 0.80) + (progress * efficiency * 0.18)
+
+    return round(raw_score, 4)
 
     def _build_obs(self, message: str = "") -> Observation:
         s = self._state
