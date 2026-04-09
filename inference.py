@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-
 import requests
-from openai import OpenAI
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "").strip()
-API_KEY = os.environ.get("API_KEY", "").strip()
-MODEL_NAME = os.environ.get("MODEL_NAME") or os.environ.get("MODEL") or "gpt-4o-mini"
 BASE_URL = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860").rstrip("/")
 
 TASKS = ["easy", "medium", "hard"]
@@ -26,20 +21,9 @@ TASK_NAMES = {
 }
 
 TASK_PROMPTS = {
-    "easy": (
-        "A business customer is offline. Identify the affected node, run the right "
-        "remote diagnostic, reboot the correct device, then close the ticket."
-    ),
-    "medium": (
-        "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the "
-        "needed spare part, dispatch the right technician, and close the ticket only after repair."
-    ),
-    "hard": (
-        "A storm caused multiple outages. Prioritize the critical customer, inspect "
-        "the overloaded aggregation node, reroute traffic to the backup, reserve the "
-        "correct part for the cabinet outage, dispatch the right technician, send the "
-        "right update, restore service, and close all incidents safely."
-    ),
+    "easy": "A business customer is offline. Identify the affected node, run the right remote diagnostic, reboot the correct device, then close the ticket.",
+    "medium": "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare part, dispatch the right technician, and close the ticket only after repair.",
+    "hard": "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet outage, dispatch the right technician, send the right update, restore service, and close all incidents safely.",
 }
 
 SCRIPTED_ACTIONS = {
@@ -71,7 +55,11 @@ def clamp_unit(x: float) -> float:
         x = float(x)
     except Exception:
         x = 0.01
-    return round(max(0.01, min(0.99, x)), 4)
+    if x <= 0.0:
+        return 0.01
+    if x >= 1.0:
+        return 0.99
+    return round(x, 4)
 
 
 def reset_env(task_id: str) -> dict:
@@ -94,133 +82,33 @@ def step_env(action_type: str, params: dict) -> dict:
     return resp.json()
 
 
-def build_prompt(obs: dict, task_id: str) -> str:
-    return f"""
-You are a Telecom NOC engineer. Resolve this task efficiently.
-
-TASK:
-{TASK_PROMPTS[task_id]}
-
-INCIDENTS:
-{json.dumps(obs.get("incidents", []), indent=2)}
-
-NETWORK:
-{json.dumps(obs.get("network", []), indent=2)}
-
-TECHNICIANS:
-{json.dumps(obs.get("technicians", []), indent=2)}
-
-INVENTORY:
-{json.dumps(obs.get("inventory", []), indent=2)}
-
-RECENT ACTIONS:
-{json.dumps(obs.get("action_log", []), indent=2)}
-
-AVAILABLE ACTIONS:
-- run_diagnostic: {{"node_id": ""}}
-- reboot_device: {{"node_id": ""}}
-- dispatch_technician: {{"tech_id": "", "location": ""}}
-- reserve_part: {{"part_id": ""}}
-- reroute_traffic: {{"from_node_id": "", "to_node_id": ""}}
-- send_customer_update: {{"incident_id": "", "message_type": "update"}}
-- close_ticket: {{"incident_id": ""}}
-- noop: {{}}
-
-Return ONLY valid JSON with this shape:
-{{"action_type":"run_diagnostic","params":{{"node_id":"ONT-007"}}}}
-""".strip()
-
-
-def normalize_action(action: dict | None) -> dict | None:
-    if not isinstance(action, dict):
-        return None
-
-    action_type = action.get("action_type", "noop")
-    params = action.get("params", {}) or {}
-
-    if not isinstance(action_type, str):
-        action_type = "noop"
-    if not isinstance(params, dict):
-        params = {}
-
-    return {
-        "action_type": action_type,
-        "params": params,
-    }
-
-
-def get_llm_action(obs: dict, task_id: str) -> dict | None:
-    if not API_BASE_URL or not API_KEY:
-        return None
-
-    try:
-        client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert telecom NOC engineer. Output JSON only.",
-                },
-                {
-                    "role": "user",
-                    "content": build_prompt(obs, task_id),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=200,
-        )
-
-        raw = (response.choices[0].message.content or "").strip()
-        if not raw:
-            return None
-
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            if len(parts) >= 2:
-                raw = parts[1].strip()
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-
-        action = json.loads(raw)
-        return normalize_action(action)
-    except Exception:
-        return None
-
-
-def choose_action(task_id: str, obs: dict, step_num: int) -> dict:
-    llm_action = get_llm_action(obs, task_id)
-    if llm_action is not None:
-        return llm_action
-
+def choose_action(task_id: str, step_num: int) -> dict:
     scripted = SCRIPTED_ACTIONS.get(task_id, [])
     if step_num < len(scripted):
         return scripted[step_num]
-
     return {"action_type": "noop", "params": {}}
+
+
+def emit(tag: str, payload: dict) -> None:
+    print(f"[{tag}] " + json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def run_task(task_id: str) -> float:
     obs = reset_env(task_id)
 
-    print(
-        "[START] " + json.dumps(
-            {
-                "task_id": task_id,
-                "task": TASK_NAMES[task_id],
-                "prompt": TASK_PROMPTS[task_id],
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
+    emit("start", {
+        "taskid": task_id,
+        "task_id": task_id,
+        "task": TASK_NAMES[task_id],
+        "prompt": TASK_PROMPTS[task_id],
+    })
 
     step_num = 0
     done = False
     score = 0.01
 
     while not done and step_num < MAX_STEPS[task_id]:
-        action = choose_action(task_id, obs, step_num)
+        action = choose_action(task_id, step_num)
 
         try:
             result = step_env(
@@ -243,36 +131,27 @@ def run_task(task_id: str) -> float:
         message = result.get("info", {}).get("message", "")
         obs = result.get("observation", obs)
 
-        print(
-            "[STEP] " + json.dumps(
-                {
-                    "task_id": task_id,
-                    "step": step_num,
-                    "action": action,
-                    "reward": reward,
-                    "done": done,
-                    "score": score,
-                    "message": message,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
+        emit("step", {
+            "taskid": task_id,
+            "task_id": task_id,
+            "step": step_num,
+            "reward": reward,
+            "score": score,
+            "done": done,
+            "message": message,
+        })
 
-    print(
-        "[END] " + json.dumps(
-            {
-                "task_id": task_id,
-                "steps": step_num,
-                "score": clamp_unit(score),
-                "done": done,
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
+    final_score = clamp_unit(score)
 
-    return clamp_unit(score)
+    emit("end", {
+        "taskid": task_id,
+        "task_id": task_id,
+        "steps": step_num,
+        "score": final_score,
+        "done": done,
+    })
+
+    return final_score
 
 
 if __name__ == "__main__":
@@ -280,26 +159,16 @@ if __name__ == "__main__":
         try:
             run_task(task)
         except Exception:
-            print(
-                "[START] " + json.dumps(
-                    {
-                        "task_id": task,
-                        "task": TASK_NAMES[task],
-                        "prompt": TASK_PROMPTS[task],
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            print(
-                "[END] " + json.dumps(
-                    {
-                        "task_id": task,
-                        "steps": 0,
-                        "score": 0.01,
-                        "done": True,
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
+            emit("start", {
+                "taskid": task,
+                "task_id": task,
+                "task": TASK_NAMES[task],
+                "prompt": TASK_PROMPTS[task],
+            })
+            emit("end", {
+                "taskid": task,
+                "task_id": task,
+                "steps": 0,
+                "score": 0.01,
+                "done": True,
+            })
