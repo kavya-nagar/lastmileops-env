@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-from .models import Action, Observation, StepResult, Incident, NetworkNode, Technician, SparePart
+from .models import (
+    Action,
+    Incident,
+    NetworkNode,
+    Observation,
+    SparePart,
+    StepResult,
+    Technician,
+)
 
 
-def strict_unit(x: float) -> float:
+def _strict_unit(x: float) -> float:
     try:
         x = float(x)
     except Exception:
@@ -13,20 +21,23 @@ def strict_unit(x: float) -> float:
     return round(max(0.01, min(0.99, x)), 4)
 
 
-ACTIONSPACE = {
-    "rundiagnostic": "Run remote diagnostic on a node. params: nodeid",
-    "rebootdevice": "Reboot a network device. params: nodeid",
-    "dispatchtechnician": "Send technician to location. params: techid, location",
-    "reservepart": "Reserve spare part. params: partid",
-    "reroutetraffic": "Reroute traffic between nodes. params: fromnodeid, tonodeid",
-    "sendcustomerupdate": "Notify customer. params: incidentid, messagetype",
-    "closeticket": "Close resolved incident. params: incidentid",
+ACTION_SPACE = {
+    "run_diagnostic": "Run remote diagnostic on a node. params: {node_id}",
+    "reboot_device": "Reboot a network device. params: {node_id}",
+    "dispatch_technician": "Send technician to location. params: {tech_id, location}",
+    "reserve_part": "Reserve spare part. params: {part_id}",
+    "reroute_traffic": "Reroute traffic between nodes. params: {from_node_id, to_node_id}",
+    "send_customer_update": "Notify customer. params: {incident_id, message_type}",
+    "close_ticket": "Close resolved incident. params: {incident_id}",
     "noop": "No action.",
 }
 
+# Backward-compatible alias so either import works.
+ACTIONSPACE = ACTION_SPACE
 
-def _easy_scenario() -> Dict[str, Any]:
-    return {
+
+SCENARIOS = {
+    "easy": lambda: {
         "task_id": "easy",
         "max_steps": 10,
         "incidents": [
@@ -52,16 +63,13 @@ def _easy_scenario() -> Dict[str, Any]:
             SparePart(id="P1", name="ONT unit", quantity=5, reserved=0),
             SparePart(id="P2", name="Line card", quantity=2, reserved=0),
         ],
-        "grader": {
+        "_grader": {
             "diagnostic_run": False,
             "reboot_done": False,
             "ticket_closed": False,
         },
-    }
-
-
-def _medium_scenario() -> Dict[str, Any]:
-    return {
+    },
+    "medium": lambda: {
         "task_id": "medium",
         "max_steps": 15,
         "incidents": [
@@ -89,17 +97,14 @@ def _medium_scenario() -> Dict[str, Any]:
             SparePart(id="P3", name="Power module", quantity=1, reserved=0),
             SparePart(id="P4", name="Splice kit", quantity=4, reserved=0),
         ],
-        "grader": {
+        "_grader": {
             "diagnostic_run": False,
             "correct_part_reserved": False,
             "correct_tech_dispatched": False,
             "ticket_closed": False,
         },
-    }
-
-
-def _hard_scenario() -> Dict[str, Any]:
-    return {
+    },
+    "hard": lambda: {
         "task_id": "hard",
         "max_steps": 20,
         "incidents": [
@@ -147,7 +152,7 @@ def _hard_scenario() -> Dict[str, Any]:
             SparePart(id="P2", name="Line card", quantity=1, reserved=0),
             SparePart(id="P3", name="Power module", quantity=0, reserved=0),
         ],
-        "grader": {
+        "_grader": {
             "critical_prioritised": False,
             "agg_inspected": False,
             "traffic_rerouted": False,
@@ -156,352 +161,262 @@ def _hard_scenario() -> Dict[str, Any]:
             "customer_updated": False,
             "all_tickets_closed": False,
         },
-    }
-
-
-SCENARIOS = {
-    "easy": _easy_scenario,
-    "medium": _medium_scenario,
-    "hard": _hard_scenario,
+    },
 }
 
 
 class LastMileOpsEnv:
-    def __init__(self) -> None:
-        self.state_data: Dict[str, Any] = {}
-        self.step_count = 0
-        self.score = 0.01
-        self.done = False
-        self.action_log: list[str] = []
+    def __init__(self):
+        self._state: Dict[str, Any] = {}
+        self._step_count = 0
+        self._score = 0.01
+        self._done = False
+        self._action_log: list[str] = []
 
     def reset(self, task_id: str = "easy") -> Observation:
         if task_id not in SCENARIOS:
-            raise ValueError(f"Unknown task '{task_id}'. Choose from: {list(SCENARIOS)}")
-        self.state_data = SCENARIOS[task_id]()
-        self.step_count = 0
-        self.score = 0.01
-        self.done = False
-        self.action_log = []
-        return self.build_obs("Environment reset.")
+            raise ValueError(f"Unknown task '{task_id}'. Choose: {list(SCENARIOS)}")
+        self._state = SCENARIOS[task_id]()
+        self._step_count = 0
+        self._score = 0.01
+        self._done = False
+        self._action_log = []
+        return self._build_obs()
 
     def step(self, action: Action) -> StepResult:
-        if not self.state_data:
-            self.reset("easy")
-
-        if self.done:
+        if self._done:
             return StepResult(
-                observation=self.build_obs("Episode already done."),
-                reward=strict_unit(0.01),
+                observation=self._build_obs(),
+                reward=_strict_unit(0.01),
                 done=True,
-                score=strict_unit(self.score),
-                info={"message": "Episode already done."},
+                score=_strict_unit(self._score),
+                info={"message": "Episode done"},
             )
 
-        self.step_count += 1
-        reward, message = self.apply_action(action)
-        reward = strict_unit(reward)
-        self.score = strict_unit(self.compute_grader_score())
-        self.done = self._all_incidents_closed() or self.step_count >= self.state_data.get("max_steps", 0)
+        self._step_count += 1
+        raw_reward, msg = self._apply_action(action)
+        reward = _strict_unit(raw_reward)
+        self._action_log.append(f"[{self._step_count}] {action.action_type}({action.params}) -> {msg}")
+        self._score = _strict_unit(self._compute_grader_score())
 
-        obs = self.build_obs(message)
+        all_closed = all(i.status == "closed" for i in self._state["incidents"])
+        self._done = all_closed or self._step_count >= self._state["max_steps"]
+
         return StepResult(
-            observation=obs,
+            observation=self._build_obs(message=msg),
             reward=reward,
-            done=self.done,
-            score=strict_unit(self.score),
+            done=self._done,
+            score=_strict_unit(self._score),
             info={
-                "step": self.step_count,
-                "grader": self.state_data.get("grader", {}),
-                "message": message,
+                "step": self._step_count,
+                "grader": self._state["_grader"],
+                "message": msg,
             },
         )
 
     def state(self) -> Dict[str, Any]:
         return {
-            "task_id": self.state_data.get("task_id", ""),
-            "step": self.step_count,
-            "max_steps": self.state_data.get("max_steps", 0),
-            "done": self.done,
-            "score": strict_unit(self.score),
-            "grader_checkpoints": self.state_data.get("grader", {}),
-            "incidents": [i.model_dump() for i in self.state_data.get("incidents", [])],
-            "network": [n.model_dump() for n in self.state_data.get("network", [])],
-            "technicians": [t.model_dump() for t in self.state_data.get("technicians", [])],
-            "inventory": [p.model_dump() for p in self.state_data.get("inventory", [])],
-            "action_log": list(self.action_log),
+            "task_id": self._state.get("task_id", ""),
+            "step": self._step_count,
+            "max_steps": self._state.get("max_steps", 0),
+            "done": self._done,
+            "score": _strict_unit(self._score),
+            "grader_checkpoints": self._state.get("_grader", {}),
+            "incidents": [i.model_dump() for i in self._state.get("incidents", [])],
+            "network": [n.model_dump() for n in self._state.get("network", [])],
+            "technicians": [t.model_dump() for t in self._state.get("technicians", [])],
+            "inventory": [p.model_dump() for p in self._state.get("inventory", [])],
+            "action_log": self._action_log,
         }
 
-    def apply_action(self, action: Action) -> Tuple[float, str]:
-        action_type = (
-            getattr(action, "action_type", None)
-            or getattr(action, "actiontype", None)
-            or "noop"
-        )
-        params = getattr(action, "params", {}) or {}
+    def _apply_action(self, action: Action) -> Tuple[float, str]:
+        t = action.action_type
+        p = action.params
+        s = self._state
+        g = self._state["_grader"]
 
-        action_type = str(action_type).strip().lower()
-        s = self.state_data
-        g = s["grader"]
-
-        if action_type == "noop":
-            self._log_action(action_type, params, "No-op used.")
+        if t == "noop":
             return 0.01, "No-op used."
 
-        if action_type == "rundiagnostic":
-            node = self.find_node(params.get("nodeid"))
+        if t == "run_diagnostic":
+            node = self._find_node(p.get("node_id", ""))
             if not node:
-                self._log_action(action_type, params, "Node not found.")
+                return 0.01, f"Node '{p.get('node_id')}' not found."
+            if node.status in ("offline", "degraded", "overloaded"):
+                if "diagnostic_run" in g and not g["diagnostic_run"]:
+                    g["diagnostic_run"] = True
+                if "agg_inspected" in g and node.type == "aggregation":
+                    g["agg_inspected"] = True
+                return 0.15, f"Diagnostic on {node.id}: {node.status}, load={node.load_pct}%"
+            return 0.05, f"Diagnostic on {node.id}: {node.status} (no fault)."
+
+        if t == "reboot_device":
+            node = self._find_node(p.get("node_id", ""))
+            if not node:
                 return 0.01, "Node not found."
 
-            if s["task_id"] == "easy" and node.id == "ONT-007" and node.status == "offline":
-                g["diagnostic_run"] = True
-                msg = f"Diagnostic complete on {node.id}. Fault confirmed."
-                self._log_action(action_type, params, msg)
-                return 0.15, msg
-
-            if s["task_id"] == "medium" and node.id == "CAB-012" and node.status == "offline":
-                g["diagnostic_run"] = True
-                msg = f"Diagnostic complete on {node.id}. Line card failure suspected."
-                self._log_action(action_type, params, msg)
-                return 0.15, msg
-
-            if s["task_id"] == "hard" and node.id == "AGG-002" and node.status == "overloaded":
-                g["agg_inspected"] = True
-                g["critical_prioritised"] = True
-                msg = f"Diagnostic complete on {node.id}. Overload confirmed."
-                self._log_action(action_type, params, msg)
-                return 0.15, msg
-
-            if s["task_id"] == "hard" and node.id == "CAB-019" and node.status == "offline":
-                msg = f"Diagnostic complete on {node.id}. Cabinet hardware fault confirmed."
-                self._log_action(action_type, params, msg)
-                return 0.12, msg
-
-            msg = f"Diagnostic on {node.id} found no actionable fault."
-            self._log_action(action_type, params, msg)
-            return 0.05, msg
-
-        if action_type == "rebootdevice":
-            node = self.find_node(params.get("nodeid"))
-            if not node:
-                self._log_action(action_type, params, "Node not found.")
-                return 0.01, "Node not found."
-
-            if s["task_id"] == "easy" and node.id == "ONT-007" and node.status == "offline":
+            if node.type == "ont" and node.status in ("offline", "degraded"):
                 node.status = "online"
                 node.load_pct = 30
-                self._resolve_incident("INC-001")
-                g["reboot_done"] = True
-                msg = f"Rebooted {node.id}. Service restored."
-                self._log_action(action_type, params, msg)
-                return 0.25, msg
 
-            msg = f"Reboot had no effect on {node.id}."
-            self._log_action(action_type, params, msg)
-            return 0.02, msg
+                if "reboot_done" in g and not g["reboot_done"]:
+                    g["reboot_done"] = True
 
-        if action_type == "reservepart":
-            part = self.find_part(params.get("partid"))
-            if not part:
-                self._log_action(action_type, params, "Part not found.")
-                return 0.01, "Part not found."
+                for inc in s["incidents"]:
+                    if inc.affected_node == node.id and inc.status in ("open", "in_progress"):
+                        inc.status = "resolved"
 
-            available_qty = part.quantity - part.reserved
-            if available_qty <= 0:
-                msg = f"{part.name} out of stock."
-                self._log_action(action_type, params, msg)
-                return 0.01, msg
+                return 0.25, f"Rebooted {node.id} -> online. Incident resolved."
 
-            part.reserved += 1
-            if part.id == "P2" and s["task_id"] in {"medium", "hard"}:
-                g["correct_part_reserved"] = True
-                msg = f"Reserved correct part: {part.name}."
-                self._log_action(action_type, params, msg)
-                return 0.20, msg
+            if node.status == "online":
+                return 0.01, "Already online."
 
-            msg = f"Reserved part: {part.name}."
-            self._log_action(action_type, params, msg)
-            return 0.08, msg
+            return 0.02, f"Reboot had no effect on {node.id}."
 
-        if action_type == "dispatchtechnician":
-            tech = self.find_tech(params.get("techid"))
+        if t == "dispatch_technician":
+            tech = self._find_tech(p.get("tech_id", ""))
             if not tech:
-                self._log_action(action_type, params, "Technician not found.")
                 return 0.01, "Technician not found."
-
             if not tech.available:
-                msg = f"{tech.name} is unavailable."
-                self._log_action(action_type, params, msg)
-                return 0.01, msg
+                return 0.01, f"{tech.name} unavailable."
+
+            location = p.get("location", "")
+            bonus = 0.0
+
+            if tech.skill == "electronics" and s["task_id"] in ("medium", "hard"):
+                if "correct_tech_dispatched" in g and not g["correct_tech_dispatched"]:
+                    g["correct_tech_dispatched"] = True
+                bonus = 0.15
 
             tech.available = False
-            tech.location = params.get("location", tech.location)
+            tech.location = location or tech.location
 
-            if tech.id == "T3" and tech.skill == "electronics" and s["task_id"] in {"medium", "hard"}:
-                g["correct_tech_dispatched"] = True
+            node = self._find_node(location)
+            if node and node.type == "cabinet" and node.status == "offline":
+                node.status = "online"
+                node.load_pct = 40
+                for inc in s["incidents"]:
+                    if inc.affected_node == node.id and inc.status in ("open", "in_progress"):
+                        inc.status = "resolved"
 
-            if s["task_id"] == "medium" and tech.id == "T3" and g.get("correct_part_reserved"):
-                cab = self.find_node("CAB-012")
-                if cab:
-                    cab.status = "online"
-                    cab.load_pct = 35
-                self._consume_reserved_part("P2")
-                self._resolve_incident("INC-010")
-                msg = f"Dispatched {tech.name}. Cabinet repaired and service restored."
-                self._log_action(action_type, params, msg)
-                return 0.25, msg
+            for inc in s["incidents"]:
+                if inc.status == "open":
+                    inc.status = "in_progress"
 
-            if s["task_id"] == "hard" and tech.id == "T3" and g.get("correct_part_reserved"):
-                cab = self.find_node("CAB-019")
-                ont = self.find_node("ONT-031")
-                if cab:
-                    cab.status = "online"
-                    cab.load_pct = 30
-                if ont:
-                    ont.status = "online"
-                    ont.load_pct = 35
-                self._consume_reserved_part("P2")
-                self._resolve_incident("INC-021")
-                self._resolve_incident("INC-022")
-                msg = f"Dispatched {tech.name}. Field repair completed for cabinet and downstream ONT."
-                self._log_action(action_type, params, msg)
-                return 0.25, msg
+            return 0.10 + bonus, f"Dispatched {tech.name} ({tech.skill}) to {location}."
 
-            msg = f"Dispatched {tech.name} to {tech.location}."
-            self._log_action(action_type, params, msg)
-            return 0.10, msg
+        if t == "reserve_part":
+            part = self._find_part(p.get("part_id", ""))
+            if not part:
+                return 0.01, "Part not found."
+            if part.quantity - part.reserved <= 0:
+                return 0.01, f"{part.name} out of stock."
 
-        if action_type == "reroutetraffic":
-            from_node = self.find_node(params.get("fromnodeid"))
-            to_node = self.find_node(params.get("tonodeid"))
-            if not from_node or not to_node:
-                self._log_action(action_type, params, "Nodes not found.")
+            part.reserved += 1
+
+            if p.get("part_id") == "P2" and s["task_id"] in ("medium", "hard"):
+                if "correct_part_reserved" in g and not g["correct_part_reserved"]:
+                    g["correct_part_reserved"] = True
+                return 0.20, f"Reserved correct part: {part.name}."
+
+            return 0.08, f"Reserved {part.name}."
+
+        if t == "reroute_traffic":
+            fn = self._find_node(p.get("from_node_id", ""))
+            tn = self._find_node(p.get("to_node_id", ""))
+            if not fn or not tn:
                 return 0.01, "Nodes not found."
 
-            if (
-                s["task_id"] == "hard"
-                and from_node.id == "AGG-002"
-                and to_node.id == "AGG-BACKUP"
-                and from_node.status == "overloaded"
-                and to_node.type == "backup"
-            ):
-                from_node.status = "online"
-                from_node.load_pct = 55
-                to_node.load_pct = min(to_node.load_pct + 35, 85)
-                g["traffic_rerouted"] = True
-                g["critical_prioritised"] = True
-                self._resolve_incident("INC-020")
-                msg = f"Traffic rerouted from {from_node.id} to {to_node.id}. Critical service restored."
-                self._log_action(action_type, params, msg)
-                return 0.30, msg
+            if fn.status == "overloaded" and tn.type == "backup":
+                fn.status = "online"
+                fn.load_pct = 55
+                tn.load_pct = min(tn.load_pct + 35, 85)
 
-            msg = "Reroute had no effect."
-            self._log_action(action_type, params, msg)
-            return 0.02, msg
+                if "traffic_rerouted" in g:
+                    g["traffic_rerouted"] = True
+                if "critical_prioritised" in g:
+                    g["critical_prioritised"] = True
 
-        if action_type == "sendcustomerupdate":
-            inc = self.find_incident(params.get("incidentid"))
+                for inc in s["incidents"]:
+                    if inc.priority == 1 and inc.status == "open":
+                        inc.status = "resolved"
+
+                return 0.30, f"Traffic rerouted {fn.id} -> {tn.id}. Critical incident resolved."
+
+            return 0.02, "Reroute had no effect."
+
+        if t == "send_customer_update":
+            inc = self._find_incident(p.get("incident_id", ""))
             if not inc:
-                self._log_action(action_type, params, "Incident not found.")
                 return 0.01, "Incident not found."
 
             if "customer_updated" in g and not g["customer_updated"]:
                 g["customer_updated"] = True
-                msg = f"Customer update sent for {inc.id}."
-                self._log_action(action_type, params, msg)
-                return 0.10, msg
+                return 0.10, f"Customer update sent for {inc.id}."
 
-            msg = f"Update noted for {inc.id}."
-            self._log_action(action_type, params, msg)
-            return 0.02, msg
+            return 0.02, "Duplicate update."
 
-        if action_type == "closeticket":
-            inc = self.find_incident(params.get("incidentid"))
+        if t == "close_ticket":
+            inc = self._find_incident(p.get("incident_id", ""))
             if not inc:
-                self._log_action(action_type, params, "Incident not found.")
                 return 0.01, "Incident not found."
 
             if inc.status == "resolved":
                 inc.status = "closed"
-                if "ticket_closed" in g:
-                    g["ticket_closed"] = True
-                if self._all_incidents_closed():
+
+                if all(i.status == "closed" for i in s["incidents"]):
+                    if "ticket_closed" in g:
+                        g["ticket_closed"] = True
                     if "all_tickets_closed" in g:
                         g["all_tickets_closed"] = True
-                    msg = f"{inc.id} closed. All incidents closed."
-                    self._log_action(action_type, params, msg)
-                    return 0.20, msg
-                msg = f"{inc.id} closed."
-                self._log_action(action_type, params, msg)
-                return 0.10, msg
+                    return 0.20, f"{inc.id} closed. ALL INCIDENTS RESOLVED."
+
+                if "ticket_closed" in g:
+                    g["ticket_closed"] = True
+
+                return 0.10, f"{inc.id} closed."
 
             if inc.status == "closed":
-                msg = f"{inc.id} already closed."
-                self._log_action(action_type, params, msg)
-                return 0.01, msg
+                return 0.01, "Already closed."
 
-            msg = f"Cannot close {inc.id}; status is {inc.status}."
-            self._log_action(action_type, params, msg)
-            return 0.01, msg
+            return 0.01, f"Cannot close - status is {inc.status}, must be resolved first."
 
-        msg = f"Unknown action '{action_type}'."
-        self._log_action(action_type, params, msg)
-        return 0.01, msg
+        return 0.01, f"Unknown action '{t}'."
 
-    def compute_grader_score(self) -> float:
-        grader = self.state_data.get("grader", {})
-        if not grader:
+    def _compute_grader_score(self) -> float:
+        g = self._state["_grader"]
+        if not g:
             return 0.01
-        achieved = sum(1 for v in grader.values() if v)
-        progress = achieved / max(len(grader), 1)
-        efficiency = max(0.0, 1.0 - (self.step_count / max(self.state_data.get("max_steps", 1), 1)))
-        raw_score = 0.01 + (0.80 * progress) + (0.18 * efficiency)
-        return strict_unit(raw_score)
 
-    def build_obs(self, message: str = "") -> Observation:
-        s = self.state_data
+        achieved = sum(1 for v in g.values() if v)
+        progress = achieved / len(g)
+        efficiency = max(0.0, 1.0 - self._step_count / self._state["max_steps"])
+        raw_score = 0.01 + progress * 0.80 + efficiency * 0.18
+        return round(raw_score, 4)
+
+    def _build_obs(self, message: str = "") -> Observation:
+        s = self._state
         return Observation(
             task_id=s.get("task_id", ""),
-            step=self.step_count,
+            step=self._step_count,
             max_steps=s.get("max_steps", 0),
-            done=self.done,
+            done=self._done,
             incidents=s.get("incidents", []),
             network=s.get("network", []),
             technicians=s.get("technicians", []),
             inventory=s.get("inventory", []),
-            action_log=self.action_log[-5:],
+            action_log=list(self._action_log[-5:]),
             message=message,
         )
 
-    def find_node(self, node_id: str | None) -> NetworkNode | None:
-        return next((n for n in self.state_data.get("network", []) if n.id == node_id), None)
+    def _find_node(self, node_id: str):
+        return next((n for n in self._state.get("network", []) if n.id == node_id), None)
 
-    def find_tech(self, tech_id: str | None) -> Technician | None:
-        return next((t for t in self.state_data.get("technicians", []) if t.id == tech_id), None)
+    def _find_tech(self, tech_id: str):
+        return next((t for t in self._state.get("technicians", []) if t.id == tech_id), None)
 
-    def find_part(self, part_id: str | None) -> SparePart | None:
-        return next((p for p in self.state_data.get("inventory", []) if p.id == part_id), None)
+    def _find_part(self, part_id: str):
+        return next((p for p in self._state.get("inventory", []) if p.id == part_id), None)
 
-    def find_incident(self, incident_id: str | None) -> Incident | None:
-        return next((i for i in self.state_data.get("incidents", []) if i.id == incident_id), None)
-
-    def _resolve_incident(self, incident_id: str) -> None:
-        inc = self.find_incident(incident_id)
-        if inc and inc.status in {"open", "in_progress", "resolved"}:
-            inc.status = "resolved"
-
-    def _consume_reserved_part(self, part_id: str) -> None:
-        part = self.find_part(part_id)
-        if not part:
-            return
-        if part.reserved > 0:
-            part.reserved -= 1
-        if part.quantity > 0:
-            part.quantity -= 1
-
-    def _all_incidents_closed(self) -> bool:
-        incidents = self.state_data.get("incidents", [])
-        return bool(incidents) and all(i.status == "closed" for i in incidents)
-
-    def _log_action(self, action_type: str, params: Dict[str, Any], message: str) -> None:
-        self.action_log.append(f"{self.step_count}. {action_type} {params} -> {message}")
+    def _find_incident(self, incident_id: str):
+        return next((i for i in self._state.get("incidents", []) if i.id == incident_id), None)
