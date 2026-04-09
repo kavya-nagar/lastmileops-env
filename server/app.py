@@ -7,7 +7,7 @@ from .models import Action, Observation, StepResult
 from .environment import LastMileOpsEnv, ACTION_SPACE
 
 app = FastAPI(
-    title="LastMileOps — Telecom NOC OpenEnv",
+    title="LastMileOps Telecom NOC OpenEnv",
     description="Real-world telecom network operations environment for AI agent training.",
     version="1.0.0",
 )
@@ -23,13 +23,13 @@ env = LastMileOpsEnv()
 
 
 class ResetRequest(BaseModel):
-    task_id: str = "easy"
+    taskid: str = "easy"
 
 
 @app.get("/")
 def root():
     return {
-        "name": "LastMileOps — Telecom NOC OpenEnv",
+        "name": "LastMileOps Telecom NOC OpenEnv",
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/health",
@@ -46,24 +46,41 @@ def health():
 def list_tasks():
     return {
         "tasks": [
-            {"id": "easy",   "name": "Single-site remote fix",    "difficulty": "easy",   "max_steps": 10},
-            {"id": "medium", "name": "Cabinet failure dispatch",   "difficulty": "medium", "max_steps": 15},
-            {"id": "hard",   "name": "Regional storm response",    "difficulty": "hard",   "max_steps": 20},
+            {
+                "id": "easy",
+                "name": "Single-site remote fix",
+                "difficulty": "easy",
+                "maxsteps": 10,
+            },
+            {
+                "id": "medium",
+                "name": "Cabinet failure dispatch",
+                "difficulty": "medium",
+                "maxsteps": 15,
+            },
+            {
+                "id": "hard",
+                "name": "Regional storm response",
+                "difficulty": "hard",
+                "maxsteps": 20,
+            },
         ]
     }
 
 
 @app.get("/actions")
 def list_actions():
-    return {"action_space": ACTION_SPACE}
+    return {"actionspace": ACTION_SPACE}
 
 
 @app.post("/reset", response_model=Observation)
 def reset(req: Optional[ResetRequest] = None):
     if req is None:
-        req = ResetRequest(task_id="easy")
+        req = ResetRequest(taskid="easy")
     try:
-        obs = env.reset(task_id=req.task_id)
+        obs = env.reset(task_id=req.taskid)
+    except TypeError:
+        obs = env.reset(req.taskid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return obs
