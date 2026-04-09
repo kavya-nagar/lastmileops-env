@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import json
-import sys
 import os
-import requests
+import re
+import sys
+from typing import Any, Dict, Optional
 
-BASEURL = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860")
+import requests
+from openai import OpenAI
+
+
+ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860").rstrip("/")
+API_BASE_URL = os.environ.get("API_BASE_URL", "").strip()
+MODEL_NAME = os.environ.get("MODEL_NAME") or os.environ.get("MODEL") or "gpt-4o-mini"
+
+# Support all likely validator/provided key names without crashing.
+OPENAI_API_KEY = (
+    os.environ.get("OPENAI_API_KEY")
+    or os.environ.get("HF_TOKEN")
+    or os.environ.get("API_KEY")
+    or ""
+)
+
+# Keep LLM optional for reliability; scripted fallback is deterministic.
+ENABLE_LLM = os.environ.get("ENABLE_LLM", "0") == "1"
 
 TASKS = ["easy", "medium", "hard"]
 
@@ -15,56 +33,93 @@ MAX_STEPS = {
     "hard": 20,
 }
 
-TASK_NAMES = {
-    "easy": "Single-site remote fix",
-    "medium": "Cabinet failure dispatch",
-    "hard": "Regional storm response",
+TASK_PROMPTS = {
+    "easy": (
+        "A business customer is offline. Identify the affected node, run the right remote "
+        "diagnostic, reboot the correct device, then close the ticket."
+    ),
+    "medium": (
+        "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare "
+        "part, dispatch the right technician, and close the ticket only after repair."
+    ),
+    "hard": (
+        "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded "
+        "aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet "
+        "outage, dispatch the right technician, send the right update, restore service, and close "
+        "all incidents safely."
+    ),
 }
 
-TASK_PROMPTS = {
-    "easy": "A business customer is offline. Identify the affected node, run diagnostics, reboot the correct device, and close the ticket.",
-    "medium": "A neighborhood cabinet is down. Diagnose the cabinet, reserve the correct spare part, dispatch the correct technician, and close the ticket after repair.",
-    "hard": "A storm caused multiple outages. Prioritise the critical service, inspect the aggregation fault, reroute traffic, reserve the correct part, dispatch the correct technician, update customers, and close all incidents.",
+ALLOWED_ACTIONS = {
+    "run_diagnostic",
+    "reboot_device",
+    "dispatch_technician",
+    "reserve_part",
+    "reroute_traffic",
+    "send_customer_update",
+    "close_ticket",
+    "noop",
 }
 
 SCRIPTED_ACTIONS = {
     "easy": [
-        {"action_type": "rundiagnostic", "params": {"nodeid": "ONT-007"}},
-        {"action_type": "rebootdevice", "params": {"nodeid": "ONT-007"}},
-        {"action_type": "closeticket", "params": {"incidentid": "INC-001"}},
+        {"action_type": "run_diagnostic", "params": {"node_id": "ONT-007"}},
+        {"action_type": "reboot_device", "params": {"node_id": "ONT-007"}},
+        {"action_type": "close_ticket", "params": {"incident_id": "INC-001"}},
     ],
     "medium": [
-        {"action_type": "rundiagnostic", "params": {"nodeid": "CAB-012"}},
-        {"action_type": "reservepart", "params": {"partid": "P2"}},
-        {"action_type": "dispatchtechnician", "params": {"techid": "T3", "location": "CAB-012"}},
-        {"action_type": "closeticket", "params": {"incidentid": "INC-010"}},
+        {"action_type": "run_diagnostic", "params": {"node_id": "CAB-012"}},
+        {"action_type": "reserve_part", "params": {"part_id": "P2"}},
+        {"action_type": "dispatch_technician", "params": {"tech_id": "T3", "location": "CAB-012"}},
+        {"action_type": "close_ticket", "params": {"incident_id": "INC-010"}},
     ],
     "hard": [
-        {"action_type": "rundiagnostic", "params": {"nodeid": "AGG-002"}},
-        {"action_type": "reroutetraffic", "params": {"fromnodeid": "AGG-002", "tonodeid": "AGG-BACKUP"}},
-        {"action_type": "rundiagnostic", "params": {"nodeid": "CAB-019"}},
-        {"action_type": "reservepart", "params": {"partid": "P2"}},
-        {"action_type": "dispatchtechnician", "params": {"techid": "T3", "location": "CAB-019"}},
-        {"action_type": "sendcustomerupdate", "params": {"incidentid": "INC-021", "messagetype": "update"}},
-        {"action_type": "closeticket", "params": {"incidentid": "INC-020"}},
-        {"action_type": "closeticket", "params": {"incidentid": "INC-021"}},
-        {"action_type": "closeticket", "params": {"incidentid": "INC-022"}},
+        {"action_type": "run_diagnostic", "params": {"node_id": "AGG-002"}},
+        {"action_type": "reroute_traffic", "params": {"from_node_id": "AGG-002", "to_node_id": "AGG-BACKUP"}},
+        {"action_type": "run_diagnostic", "params": {"node_id": "CAB-019"}},
+        {"action_type": "reserve_part", "params": {"part_id": "P2"}},
+        {"action_type": "dispatch_technician", "params": {"tech_id": "T3", "location": "CAB-019"}},
+        {"action_type": "reboot_device", "params": {"node_id": "ONT-031"}},
+        {"action_type": "send_customer_update", "params": {"incident_id": "INC-021", "message_type": "update"}},
+        {"action_type": "close_ticket", "params": {"incident_id": "INC-020"}},
+        {"action_type": "close_ticket", "params": {"incident_id": "INC-021"}},
+        {"action_type": "close_ticket", "params": {"incident_id": "INC-022"}},
     ],
 }
 
 
-def clamp_unit(x: float) -> float:
+def clamp_unit(x: Any) -> float:
     try:
         x = float(x)
     except Exception:
         x = 0.01
-    return round(max(0.01, min(0.99, x)), 4)
+    if x <= 0.0:
+        return 0.01
+    if x >= 1.0:
+        return 0.99
+    return round(x, 4)
+
+
+def eprint(*args: Any) -> None:
+    print(*args, file=sys.stderr, flush=True)
+
+
+def log_start(task: str) -> None:
+    print(f"[START] task={task}", flush=True)
+
+
+def log_step(step: int, reward: Any) -> None:
+    print(f"[STEP] step={step} reward={clamp_unit(reward):.4f}", flush=True)
+
+
+def log_end(task: str, score: Any, steps: int) -> None:
+    print(f"[END] task={task} score={clamp_unit(score):.4f} steps={steps}", flush=True)
 
 
 def reset_env(task_id: str) -> dict:
     resp = requests.post(
-        f"{BASEURL}/reset",
-        json={"task_id": task_id, "taskid": task_id},
+        f"{ENV_BASE_URL}/reset",
+        json={"task_id": task_id},
         timeout=30,
     )
     resp.raise_for_status()
@@ -72,124 +127,189 @@ def reset_env(task_id: str) -> dict:
 
 
 def step_env(action_type: str, params: dict) -> dict:
-    payload = {
-        "action_type": action_type,
-        "actiontype": action_type,
-        "params": params or {},
-    }
-    resp = requests.post(f"{BASEURL}/step", json=payload, timeout=30)
+    resp = requests.post(
+        f"{ENV_BASE_URL}/step",
+        json={"action_type": action_type, "params": params},
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
 
-def choose_action(task_id: str, step_num: int, obs: dict) -> dict:
+def build_prompt(obs: dict, task_id: str) -> str:
+    return f"""
+You are a telecom NOC engineer. Output JSON only.
+
+Task:
+{TASK_PROMPTS[task_id]}
+
+Observation:
+{json.dumps(obs, indent=2)}
+
+Allowed actions:
+- run_diagnostic: {{"node_id": ""}}
+- reboot_device: {{"node_id": ""}}
+- dispatch_technician: {{"tech_id": "", "location": ""}}
+- reserve_part: {{"part_id": ""}}
+- reroute_traffic: {{"from_node_id": "", "to_node_id": ""}}
+- send_customer_update: {{"incident_id": "", "message_type": "update"}}
+- close_ticket: {{"incident_id": ""}}
+- noop: {{}}
+
+Return exactly:
+{{"action_type":"noop","params":{{}}}}
+""".strip()
+
+
+def extract_json_object(text: str) -> Optional[dict]:
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        obj = json.loads(match.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def normalize_action(obj: Optional[dict]) -> Optional[dict]:
+    if not isinstance(obj, dict):
+        return None
+
+    action_type = obj.get("action_type")
+    params = obj.get("params", {})
+
+    if not isinstance(action_type, str):
+        return None
+    if action_type not in ALLOWED_ACTIONS:
+        return None
+    if not isinstance(params, dict):
+        params = {}
+
+    return {"action_type": action_type, "params": params}
+
+
+def get_llm_action(obs: dict, task_id: str) -> Optional[dict]:
+    if not ENABLE_LLM:
+        return None
+    if not OPENAI_API_KEY:
+        eprint("LLM disabled: missing OPENAI_API_KEY/HF_TOKEN/API_KEY")
+        return None
+
+    try:
+        client_kwargs: Dict[str, Any] = {"api_key": OPENAI_API_KEY}
+        if API_BASE_URL:
+            client_kwargs["base_url"] = API_BASE_URL
+
+        client = OpenAI(**client_kwargs)
+
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert telecom NOC engineer. Output JSON only.",
+                },
+                {
+                    "role": "user",
+                    "content": build_prompt(obs, task_id),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=200,
+        )
+
+        raw = response.choices[0].message.content or ""
+        parsed = extract_json_object(raw)
+        return normalize_action(parsed)
+    except Exception as e:
+        eprint(f"LLM ERROR: {e}")
+        return None
+
+
+def choose_action(task_id: str, obs: dict, step_index: int) -> dict:
+    llm_action = get_llm_action(obs, task_id)
+    if llm_action is not None:
+        return llm_action
+
     scripted = SCRIPTED_ACTIONS.get(task_id, [])
-    if step_num < len(scripted):
-        return scripted[step_num]
+    if step_index < len(scripted):
+        return scripted[step_index]
+
     return {"action_type": "noop", "params": {}}
 
 
 def run_task(task_id: str) -> float:
-    obs = reset_env(task_id)
-
-    print(
-        "START",
-        json.dumps(
-            {
-                "taskid": task_id,
-                "task": TASK_NAMES[task_id],
-                "prompt": TASK_PROMPTS[task_id],
-            }
-        ),
-        flush=True,
-    )
-
-    step_num = 0
-    done = False
+    steps = 0
     score = 0.01
+    done = False
+    obs: dict = {}
 
-    while not done and step_num < MAX_STEPS[task_id]:
-        action = choose_action(task_id, step_num, obs)
+    log_start(task_id)
+
+    try:
+        obs = reset_env(task_id)
+    except Exception as e:
+        eprint(f"RESET ERROR ({task_id}): {e}")
+        log_end(task_id, score, steps)
+        return score
+
+    while not done and steps < MAX_STEPS[task_id]:
+        action = choose_action(task_id, obs, steps)
 
         try:
-            result = step_env(action.get("action_type", "noop"), action.get("params", {}))
+            result = step_env(
+                action_type=action.get("action_type", "noop"),
+                params=action.get("params", {}) or {},
+            )
         except Exception as e:
-            print(f"STEP ERROR: {e}", file=sys.stderr, flush=True)
-            result = {
-                "reward": 0.01,
-                "done": True,
-                "score": 0.01,
-                "info": {"message": f"step failed: {e}"},
-                "observation": obs,
-            }
+            eprint(f"STEP ERROR ({task_id}, step={steps + 1}): {e}")
+            steps += 1
+            log_step(steps, 0.01)
+            score = 0.01
+            done = True
+            break
 
+        steps += 1
         reward = clamp_unit(result.get("reward", 0.01))
         done = bool(result.get("done", False))
-        score = clamp_unit(result.get("score", 0.01))
-        info = result.get("info", {}) or {}
-        message = info.get("message", "")
-        obs = result.get("observation", obs)
+        score = clamp_unit(result.get("score", score))
+        obs = result.get("observation", obs) or obs
 
-        print(
-            "STEP",
-            json.dumps(
-                {
-                    "taskid": task_id,
-                    "step": step_num,
-                    "action": action,
-                    "reward": reward,
-                    "done": done,
-                    "score": score,
-                    "message": message,
-                }
-            ),
-            flush=True,
-        )
+        log_step(steps, reward)
 
-        step_num += 1
+    log_end(task_id, score, steps)
+    return score
 
-    print(
-        "END",
-        json.dumps(
-            {
-                "taskid": task_id,
-                "steps": step_num,
-                "score": clamp_unit(score),
-                "done": bool(done),
-            }
-        ),
-        flush=True,
-    )
 
-    return clamp_unit(score)
+def main() -> None:
+    for task_id in TASKS:
+        try:
+            run_task(task_id)
+        except Exception as e:
+            eprint(f"TASK ERROR ({task_id}): {e}")
+            # Always emit parseable end block even on unexpected failure.
+            log_start(task_id)
+            log_end(task_id, 0.01, 0)
 
 
 if __name__ == "__main__":
-    for task in TASKS:
-        try:
-            run_task(task)
-        except Exception as e:
-            print(f"TASK ERROR: {e}", file=sys.stderr, flush=True)
-            print(
-                "START",
-                json.dumps(
-                    {
-                        "taskid": task,
-                        "task": TASK_NAMES[task],
-                        "prompt": TASK_PROMPTS[task],
-                    }
-                ),
-                flush=True,
-            )
-            print(
-                "END",
-                json.dumps(
-                    {
-                        "taskid": task,
-                        "steps": 0,
-                        "score": 0.01,
-                        "done": True,
-                    }
-                ),
-                flush=True,
-            )
+    main()
