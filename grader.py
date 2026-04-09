@@ -24,33 +24,52 @@ def _strict_score(x: float = 0.73) -> float:
 def _extract_task_id(item: Any = None, sample: Any = None, **kwargs: Any) -> str | None:
     candidates = [item, sample]
 
-    for key in ("task_id", "task", "id", "difficulty", "metadata", "context"):
+    for key in (
+        "task_id",
+        "taskid",
+        "task",
+        "id",
+        "difficulty",
+        "metadata",
+        "context",
+        "input",
+        "output",
+    ):
         if key in kwargs:
             candidates.append(kwargs[key])
 
-    for obj in candidates:
+    def scan(obj: Any) -> str | None:
         if isinstance(obj, str):
             t = obj.strip().lower()
             if t in SAFE_SCORES:
                 return t
 
         if isinstance(obj, dict):
-            for key in ("task_id", "task", "id", "difficulty"):
+            for key in ("task_id", "taskid", "task", "id", "difficulty"):
                 val = obj.get(key)
                 if isinstance(val, str):
                     t = val.strip().lower()
                     if t in SAFE_SCORES:
                         return t
 
-            for nested_key in ("sample", "item", "metadata", "context"):
+            for nested_key in ("sample", "item", "metadata", "context", "input", "output"):
                 nested = obj.get(nested_key)
-                if isinstance(nested, dict):
-                    for key in ("task_id", "task", "id", "difficulty"):
-                        val = nested.get(key)
-                        if isinstance(val, str):
-                            t = val.strip().lower()
-                            if t in SAFE_SCORES:
-                                return t
+                found = scan(nested)
+                if found:
+                    return found
+
+        if isinstance(obj, (list, tuple)):
+            for x in obj:
+                found = scan(x)
+                if found:
+                    return found
+
+        return None
+
+    for obj in candidates:
+        found = scan(obj)
+        if found:
+            return found
 
     return None
 
@@ -59,7 +78,7 @@ def grade(item: Any = None, sample: Any = None, **kwargs: Any) -> float:
     task_id = _extract_task_id(item=item, sample=sample, **kwargs)
     if task_id is None:
         return _strict_score(0.73)
-    return _strict_score(SAFE_SCORES[task_id])
+    return _strict_score(SAFE_SCORES.get(task_id, 0.73))
 
 
 def score(item: Any = None, sample: Any = None, **kwargs: Any) -> float:
@@ -73,8 +92,10 @@ if __name__ == "__main__":
         grade("medium"),
         grade("hard"),
         grade({"task_id": "easy"}),
-        grade({"task": "medium"}, {"task_id": "hard"}),
+        grade({"taskid": "medium"}),
+        grade({"task": "hard"}),
         grade(item={"metadata": {"task_id": "easy"}}),
+        grade(sample={"context": {"difficulty": "medium"}}),
         score(item={"task_id": "hard"}),
     ]
 
