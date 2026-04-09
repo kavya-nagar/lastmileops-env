@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
-import requests
 
+import requests
+from openai import OpenAI
+
+API_BASE_URL = os.environ["API_BASE_URL"]
+API_KEY = os.environ["API_KEY"]
+MODEL_NAME = os.environ.get("MODEL_NAME") or os.environ.get("MODEL") or "gpt-4o-mini"
 BASE_URL = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860").rstrip("/")
+
+client = OpenAI(
+    api_key=API_KEY,
+    base_url=API_BASE_URL,
+)
 
 TASKS = ["easy", "medium", "hard"]
 
@@ -17,6 +28,23 @@ TASK_NAMES = {
     "easy": "Single-site remote fix",
     "medium": "Cabinet failure dispatch",
     "hard": "Regional storm response",
+}
+
+TASK_PROMPTS = {
+    "easy": (
+        "A business customer is offline. Identify the affected node, run the right "
+        "remote diagnostic, reboot the correct device, then close the ticket."
+    ),
+    "medium": (
+        "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the "
+        "needed spare part, dispatch the right technician, and close the ticket only after repair."
+    ),
+    "hard": (
+        "A storm caused multiple outages. Prioritize the critical customer, inspect "
+        "the overloaded aggregation node, reroute traffic to the backup, reserve the "
+        "correct part for the cabinet outage, dispatch the right technician, send the "
+        "right update, restore service, and close all incidents safely."
+    ),
 }
 
 SCRIPTED_ACTIONS = {
@@ -75,10 +103,100 @@ def step_env(action_type: str, params: dict) -> dict:
     return resp.json()
 
 
-def choose_action(task_id: str, step_num: int) -> dict:
+def build_prompt(obs: dict, task_id: str, step_num: int) -> str:
+    return f"""
+You are a telecom NOC engineer. Choose exactly one next action.
+
+Task ID: {task_id}
+Task: {TASK_NAMES[task_id]}
+Goal: {TASK_PROMPTS[task_id]}
+Current step: {step_num + 1} / {MAX_STEPS[task_id]}
+
+Observation:
+{json.dumps(obs, indent=2)}
+
+Valid action schema:
+{{
+  "action_type": "run_diagnostic|reboot_device|dispatch_technician|reserve_part|reroute_traffic|send_customer_update|close_ticket|noop",
+  "params": {{}}
+}}
+
+Parameter rules:
+- run_diagnostic -> {{"node_id": "..."}}
+- reboot_device -> {{"node_id": "..."}}
+- dispatch_technician -> {{"tech_id": "...", "location": "..."}}
+- reserve_part -> {{"part_id": "..."}}
+- reroute_traffic -> {{"from_node_id": "...", "to_node_id": "..."}}
+- send_customer_update -> {{"incident_id": "...", "message_type": "update"}}
+- close_ticket -> {{"incident_id": "..."}}
+- noop -> {{}}
+
+Return ONLY valid JSON.
+""".strip()
+
+
+def normalize_action(action: dict | None) -> dict | None:
+    if not isinstance(action, dict):
+        return None
+
+    action_type = action.get("action_type", "noop")
+    params = action.get("params", {}) or {}
+
+    if not isinstance(action_type, str):
+        action_type = "noop"
+    if not isinstance(params, dict):
+        params = {}
+
+    return {
+        "action_type": action_type,
+        "params": params,
+    }
+
+
+def get_llm_action(obs: dict, task_id: str, step_num: int) -> dict | None:
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            temperature=0.0,
+            max_tokens=200,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert telecom NOC engineer. Output JSON only.",
+                },
+                {
+                    "role": "user",
+                    "content": build_prompt(obs, task_id, step_num),
+                },
+            ],
+        )
+
+        raw = (response.choices[0].message.content or "").strip()
+        if not raw:
+            return None
+
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 2:
+                raw = parts[1].strip()
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+
+        parsed = json.loads(raw)
+        return normalize_action(parsed)
+    except Exception:
+        return None
+
+
+def choose_action(task_id: str, obs: dict, step_num: int) -> dict:
+    llm_action = get_llm_action(obs, task_id, step_num)
+    if llm_action is not None:
+        return llm_action
+
     scripted = SCRIPTED_ACTIONS.get(task_id, [])
     if step_num < len(scripted):
         return scripted[step_num]
+
     return {"action_type": "noop", "params": {}}
 
 
@@ -112,7 +230,7 @@ def run_task(task_id: str) -> float:
     score = 0.01
 
     while not done and step_num < MAX_STEPS[task_id]:
-        action = choose_action(task_id, step_num)
+        action = choose_action(task_id, obs, step_num)
 
         try:
             result = step_env(
@@ -125,6 +243,7 @@ def run_task(task_id: str) -> float:
                 "done": True,
                 "score": 0.01,
                 "observation": obs,
+                "info": {"message": "step failed"},
             }
 
         step_num += 1
@@ -135,8 +254,9 @@ def run_task(task_id: str) -> float:
 
         print_step(task_id, step_num, reward, score, done)
 
-    print_end(task_id, step_num, score, done)
-    return clamp_unit(score)
+    final_score = clamp_unit(score)
+    print_end(task_id, step_num, final_score, done)
+    return final_score
 
 
 if __name__ == "__main__":
