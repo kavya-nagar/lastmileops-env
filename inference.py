@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import requests
 
@@ -18,12 +17,6 @@ TASK_NAMES = {
     "easy": "Single-site remote fix",
     "medium": "Cabinet failure dispatch",
     "hard": "Regional storm response",
-}
-
-TASK_PROMPTS = {
-    "easy": "A business customer is offline. Identify the affected node, run the right remote diagnostic, reboot the correct device, then close the ticket.",
-    "medium": "A neighborhood cabinet is down. Diagnose the correct cabinet, reserve the needed spare part, dispatch the right technician, and close the ticket only after repair.",
-    "hard": "A storm caused multiple outages. Prioritize the critical customer, inspect the overloaded aggregation node, reroute traffic to the backup, reserve the correct part for the cabinet outage, dispatch the right technician, send the right update, restore service, and close all incidents safely.",
 }
 
 SCRIPTED_ACTIONS = {
@@ -89,19 +82,30 @@ def choose_action(task_id: str, step_num: int) -> dict:
     return {"action_type": "noop", "params": {}}
 
 
-def emit(tag: str, payload: dict) -> None:
-    print(f"[{tag}] " + json.dumps(payload, ensure_ascii=False), flush=True)
+def print_start(task_id: str) -> None:
+    print(
+        f"[START] task={task_id} task_id={task_id} name={TASK_NAMES[task_id]}",
+        flush=True,
+    )
+
+
+def print_step(task_id: str, step_num: int, reward: float, score: float, done: bool) -> None:
+    print(
+        f"[STEP] task={task_id} task_id={task_id} step={step_num} reward={clamp_unit(reward)} score={clamp_unit(score)} done={done}",
+        flush=True,
+    )
+
+
+def print_end(task_id: str, step_num: int, score: float, done: bool) -> None:
+    print(
+        f"[END] task={task_id} task_id={task_id} steps={step_num} score={clamp_unit(score)} done={done}",
+        flush=True,
+    )
 
 
 def run_task(task_id: str) -> float:
     obs = reset_env(task_id)
-
-    emit("start", {
-        "taskid": task_id,
-        "task_id": task_id,
-        "task": TASK_NAMES[task_id],
-        "prompt": TASK_PROMPTS[task_id],
-    })
+    print_start(task_id)
 
     step_num = 0
     done = False
@@ -115,12 +119,11 @@ def run_task(task_id: str) -> float:
                 action.get("action_type", "noop"),
                 action.get("params", {}),
             )
-        except Exception as e:
+        except Exception:
             result = {
                 "reward": 0.01,
                 "done": True,
                 "score": 0.01,
-                "info": {"message": f"step failed: {e}"},
                 "observation": obs,
             }
 
@@ -128,30 +131,12 @@ def run_task(task_id: str) -> float:
         reward = clamp_unit(result.get("reward", 0.01))
         done = bool(result.get("done", False))
         score = clamp_unit(result.get("score", 0.01))
-        message = result.get("info", {}).get("message", "")
         obs = result.get("observation", obs)
 
-        emit("step", {
-            "taskid": task_id,
-            "task_id": task_id,
-            "step": step_num,
-            "reward": reward,
-            "score": score,
-            "done": done,
-            "message": message,
-        })
+        print_step(task_id, step_num, reward, score, done)
 
-    final_score = clamp_unit(score)
-
-    emit("end", {
-        "taskid": task_id,
-        "task_id": task_id,
-        "steps": step_num,
-        "score": final_score,
-        "done": done,
-    })
-
-    return final_score
+    print_end(task_id, step_num, score, done)
+    return clamp_unit(score)
 
 
 if __name__ == "__main__":
@@ -159,16 +144,5 @@ if __name__ == "__main__":
         try:
             run_task(task)
         except Exception:
-            emit("start", {
-                "taskid": task,
-                "task_id": task,
-                "task": TASK_NAMES[task],
-                "prompt": TASK_PROMPTS[task],
-            })
-            emit("end", {
-                "taskid": task,
-                "task_id": task,
-                "steps": 0,
-                "score": 0.01,
-                "done": True,
-            })
+            print_start(task)
+            print_end(task, 0, 0.01, True)
